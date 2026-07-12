@@ -1,0 +1,7 @@
+# The simulator uses only the Python standard library (Python 3.9+).
+# No third-party packages are required to run `python run.py`.
+#
+# Optional, for later extensions (plotting, real-trace parsing, stats):
+# numpy
+# pandas
+# matplotlib
