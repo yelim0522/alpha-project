@@ -11,6 +11,9 @@ MEC(멀티액세스 엣지 컴퓨팅)를 메인 주제로 하는 논문 작업 �
 둡니다. 예측·우선순위 기반 선제 전송·적응적 재계산은 이를 구현하는 경량 수단입니다.
 
 - `paper/draft.md` — 논문 초안(서론·문제제기·시스템 모델·제안 방법·실험 설계)
+- `paper/semester-plan-2026-2.md` — 2026-2학기(약 3.5개월) 연구 계획. **여기서 시작**
+- `paper/related-work-map.md` — ctHO / ImpactHO / Pallas / 초안 비교
+- `paper/novelty-memo.md` — 2주차 기여 게이트 템플릿
 - `paper/references.md` — 24~26년 중심 참고문헌
 - `sim/` — 표준 라이브러리 기반 이산시간 시뮬레이터(정책 비교)
 
