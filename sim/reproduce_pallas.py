@@ -13,15 +13,10 @@ Run:  python3 reproduce_pallas.py [--t-avail 5] [--dt 0.1]
 """
 
 import argparse
-from typing import Dict
 
-from environment import (
-    Server, User, CostParams, LinkLoad, MODEL_PRESETS, advance_preparations,
-    optimal_prefill_length, handover_delay,
-)
-from metrics import Metrics
+from environment import Server, MODEL_PRESETS, optimal_prefill_length, handover_delay
+from minisim import mini_sim, params_for
 from policies import PallasApprox, Coordinated
-from prediction import Prediction
 
 PALLAS_TABLE1 = {  # ms, Qwen3-32B @ 300 Mbps
     "Full-Copy":     {1000: 7165, 2000: 14310, 4000: 29066},
@@ -36,14 +31,6 @@ PALLAS_FIG8A = {
     3: dict(pallas_avg=240, pallas_worst=283, ctho_worst=None),
     4: dict(pallas_avg=292, pallas_worst=359, ctho_worst=507),
 }
-
-
-def params_for(model: str) -> CostParams:
-    p = MODEL_PRESETS[model]
-    return CostParams(kv_mb_per_token=p["kv_kib"] / 1024.0, decode_rate=p["decode_rate"],
-                      activation_latency=p["t0_reactive"],
-                      activation_latency_proactive=p["t0_proactive"],
-                      activation_serial=0.04, itl_base_ms=p["itl_ms"])
 
 
 def pct(sim, meas):
@@ -75,41 +62,9 @@ def part_a():
 
 
 # --------------------------------------------------------------------------- #
-def hh_scenario(policy, K, model, link_mbps, context, t_avail, dt, vram_mb=20000.0):
+def hh_scenario(policy, K, model, link_mbps, context, t_avail, dt):
     """K UEs migrate simultaneously from server 0 to server 1. Returns list of SIT (s)."""
-    p, params = MODEL_PRESETS[model], params_for(model)
-    B = link_mbps / 8.0
-    servers: Dict[int, Server] = {
-        0: Server(0, 0.0, 0.0, 1.0, p["prefill_speed"], B, vram_mb),
-        1: Server(1, 1.0, 0.0, 1.0, p["prefill_speed"], B, vram_mb),
-    }
-    users = [User(id=i, x=0.0, y=0.0, tokens=float(context), server=0, anchor=0) for i in range(K)]
-    preds = {u.id: Prediction(1, t_avail, 1.0) for u in users}
-    metrics = Metrics()
-    policy.reset()
-    policy.trigger_log = []
-    loads = {sid: LinkLoad() for sid in servers}
-    c = params.kv_mb_per_token
-    t = 0.0
-    n_steps = int(round(t_avail / dt))
-    for _ in range(n_steps):
-        policy.on_step(t, dt, users, servers, params, preds, loads, metrics)
-        loads = advance_preparations(users, servers, params, t, dt, policy.order_key)
-        for u in users:
-            u.tokens += params.decode_rate * dt
-        t += dt
-    tgt = servers[1]
-    n_gpu = sum(1 for u in users if u.prep is None or u.prep.target != 1)
-    v_share = tgt.prefill_share(n_gpu + loads[1].prefills)
-    bw_share = tgt.backhaul_bw / max(1, K + loads[1].streams)
-    sits, activations = [], 0
-    for u in users:
-        dec = policy.plan_handover(u, tgt, params, v_share, bw_share, False, preds[u.id], t)
-        if dec.used_prep:
-            dec.sit += activations * params.activation_serial
-            activations += 1
-        sits.append(dec.sit)
-    return sits
+    return mini_sim(policy, model, link_mbps, [context] * K, [t_avail] * K, dt)
 
 
 def ctho_hh(K, model, link_mbps, context):

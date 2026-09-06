@@ -18,6 +18,7 @@ from typing import Dict, List
 
 from environment import (
     Server, User, CostParams, LinkLoad, MODEL_PRESETS, nearest_server, advance_preparations,
+    edf_key,
 )
 from mobility import RandomWaypoint, GroupFlow
 from metrics import Metrics
@@ -116,7 +117,10 @@ def run_policy(policy, cfg, server_list, trace) -> dict:
             # of the users handing over now). Activating a finished prefix is not a
             # prefill and does not dilute the share.
             n_gpu = sum(1 for u, _ in lst if u.prep is None or u.prep.target != sid)
-            v_share = srv.prefill_share(n_gpu + bg.prefills)
+            # Under EDF service the recoveries (deadline = now) pre-empt in-flight
+            # preparations; under FCFS they queue behind them.
+            n_bg = 0 if policy.order_key is edf_key else bg.prefills
+            v_share = srv.prefill_share(n_gpu + n_bg)
             bw_share = srv.backhaul_bw / max(1, n_rec + bg.streams)
             activations = 0
             for u, dst in lst:
@@ -226,10 +230,12 @@ def policies_for(cfg):
         pols += [PallasApprox(t_max=15.0, label="pallas-tmax15"),
                  PallasApprox(alpha=0.5, label="pallas-a0.5"),
                  PallasApprox(ewma=0.95, t_max=15.0, label="pallas-fastobs"),
-                 Coordinated(k_max=None, label="coord-nocap"),
-                 Coordinated(k_max=2, label="coord-k2"),
-                 Coordinated(k_max=8, label="coord-k8"),
-                 Coordinated(occ_mode="window", label="coord-occwin"),
+                 PallasApprox(edf=True, label="pallas-edf"),
+                 Coordinated(social=False, label="coord-nosocial"),
+                 Coordinated(beta=0.5, label="coord-b0.5"),
+                 Coordinated(beta=2.0, label="coord-b2"),
+                 Coordinated(beta=4.0, label="coord-b4"),
+                 Coordinated(t_max=15.0, label="coord-tmax15"),
                  Coordinated(stream_util=9.0, label="coord-stream")]
     if cfg.ablation:
         pols += ablation_ladder()

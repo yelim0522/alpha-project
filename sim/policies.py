@@ -12,11 +12,14 @@ Proactive, uncoordinated (Pallas approximation):
                       effective rates; prefix prefill (FCFS) + suffix streaming.
 Proactive, coordinated (proposed):
   - Coordinated     : per-target scheduler that plans trigger times jointly for all
-                      users predicted toward the same target (deadline-ordered,
-                      capacity-capped staggering), chooses per-user suffix handling
-                      (stream vs. defer-and-recompute) from planned link load,
-                      serves prefill EDF, admits by VRAM budget, and decides
-                      migrate-vs-detour for unplanned/ping-pong handovers.
+                      users predicted toward the same target. Windows are evaluated
+                      against the *planned* GPU occupancy (fluid model over the
+                      window grid, EDF-aware) and charged for the delay they impose
+                      on already-planned prefills, which staggers triggers; plans
+                      are sticky until the prediction changes. Also chooses per-user
+                      suffix handling (stream vs. defer-and-recompute) from planned
+                      link load, serves prefill EDF, admits by VRAM budget, and
+                      decides migrate-vs-detour for unplanned/ping-pong handovers.
 """
 
 import math
@@ -132,11 +135,12 @@ class PallasApprox(Policy):
 
     name = "pallas-approx"
 
-    def __init__(self, alpha=0.8, t_max=5.0, grid=0.2, ewma=0.5, label=None):
+    def __init__(self, alpha=0.8, t_max=5.0, grid=0.2, ewma=0.5, label=None, edf=False):
         self.alpha = alpha
         self.t_max = t_max
         self.grid = grid
         self.ewma = ewma
+        self.order_key = edf_key if edf else fcfs_key
         if label:
             self.name = label
         self.reset()
@@ -223,23 +227,29 @@ class PallasApprox(Policy):
 class Coordinated(PallasApprox):
     """Target-level joint planning of prefetching windows.
 
-    For every target m and control cycle, users predicted toward m are planned in
-    deadline order. Each user is given the window that minimises the Pallas
-    objective *subject to* a cap on planned concurrency over that window, using
-    nominal capacities and the planned (not observed) sharing factor k. Later
-    arrivals are therefore pushed to earlier, emptier slots instead of piling
-    onto the same instant. Suffix handling is chosen per user: stream only if the
-    planned aggregate stream rate stays under `stream_util`, else defer and
-    recompute/transfer the (short) suffix at handover with an optimal split.
+    For every target m and control cycle, users predicted toward m that have no
+    plan yet are planned in deadline order against the planned GPU occupancy
+    (active preparations + sticky plans). For each candidate window the prefill
+    finish time is computed with a fluid model over the window grid that follows
+    the target's service discipline (EDF: earlier deadlines are served first), and
+    the Pallas objective is extended with the delay the window imposes on
+    later-deadline prefills (weight beta). Saturated slots are therefore avoided
+    and triggers are staggered. A plan is kept until the prediction changes and
+    fires at its planned instant (same trigger rule as Pallas). Suffix handling
+    is chosen per user: stream only if the planned aggregate stream rate stays
+    under `stream_util`, else defer and recompute/transfer the (short) suffix at
+    handover with an optimal split.
 
-    With a single candidate and no active preparation (k = 1) the evaluation
-    reduces exactly to Pallas's grid search: same window grid, same objective,
-    same trigger rule, suffix always streamed. Coordination only changes the
-    decision when it can see contention.
+    With a single candidate and no active preparation the evaluation reduces
+    exactly to Pallas's grid search: same window grid, same objective, same
+    trigger rule, suffix always streamed. Coordination only changes the decision
+    when it can see contention.
 
     Ablation switches (all True = proposed method):
-      planned_k   : rate estimate from planned occupancy instead of observed EWMA
-      k_max       : concurrency cap that forces staggering (None = uncapped)
+      planned_k   : prefill finish time from the planned GPU occupancy profile
+                    (fluid model over the window grid) instead of observed EWMA
+      social      : add the delay a window imposes on already-planned prefills
+                    (externality) to the objective; this is what staggers triggers
       suffix_mode : per-user stream-vs-defer choice (False = always stream)
       edf         : deadline-ordered prefill service at the target (False = FCFS)
       detour      : transient detour + background settle for unplanned/ping-pong
@@ -248,30 +258,73 @@ class Coordinated(PallasApprox):
 
     name = "coordinated"
 
-    def __init__(self, alpha=0.8, t_max=15.0, grid=0.2, k_max=4, stream_util=0.6,
+    def __init__(self, alpha=0.8, beta=1.0, t_max=5.0, grid=0.2, stream_util=0.6,
                  margin_min=0.0, detour_hops=2, settle_grace=10.0, label=None,
-                 planned_k=True, suffix_mode=True, edf=True, detour=True, occ_mode="gpu"):
+                 planned_k=True, social=True, suffix_mode=True, edf=True, detour=True):
         super().__init__(alpha=alpha, t_max=t_max, grid=grid, label=label)
-        self.k_max = k_max if k_max is not None else 10 ** 9
-        self.occ_mode = occ_mode          # "gpu": prefill span only; "window": whole window
+        self.beta = beta                  # weight of the externality (delay imposed on others)
         self.stream_util = stream_util
         self.margin_min = margin_min
         self.detour_hops = detour_hops if detour else 0
         self.settle_grace = settle_grace
         self.planned_k = planned_k
+        self.social = social
         self.suffix_mode = suffix_mode
         self.order_key = edf_key if edf else fcfs_key
 
-    def _cost_k(self, tw, t_remain, K, srv, k, params, contended):
-        """Pallas objective evaluated with planned sharing factor k; returns
-        (J, stream_suffix)."""
+    def _fluid_prefill(self, n_early, n_late, s_bin, L, srv, contended):
+        """Walk the planned occupancy from bin s_bin until L tokens are prefilled.
+        n_early[b] / n_late[b] count already-planned prefills in bin b whose
+        deadline is earlier-or-equal / later than the candidate's.
+        Returns (duration_s, externality_s, k_peak): the prefill time under the
+        target's service discipline, the total delay (summed over the others)
+        the candidate imposes on later-deadline prefills, and the peak sharing.
+
+        EDF service: earlier deadlines are served first, so the candidate only
+        gets what they leave and never slows them; it displaces later ones.
+        FCFS service (ablation): approximated as processor sharing."""
+        g, v1, P = self.grid, srv.prefill_speed, srv.prefill_parallel
+        edf = self.order_key is edf_key
+        tokens, dur, ext, k_peak, b = 0.0, 0.0, 0.0, 1, s_bin
+        while tokens < L - 1e-9:
+            ne = n_early[b] if (contended and b < len(n_early)) else 0
+            nl = n_late[b] if (contended and b < len(n_late)) else 0
+            n = ne + nl
+            k_peak = max(k_peak, n + 1)
+            if edf:
+                rate = v1 * min(1.0, max(0.0, P - ne))
+                saturated = n + 1 > P and nl > 0 and rate > 0
+            else:
+                rate = v1 * min(1.0, P / (n + 1))
+                saturated = n + 1 > P
+            if rate <= 0:                        # wait for earlier deadlines to clear
+                dur += g
+                b += 1
+                if dur > 4 * self.t_max:         # safety: never spin forever
+                    return dur, ext, k_peak
+                continue
+            step = rate * g
+            frac = min(1.0, (L - tokens) / step)
+            tokens += step * frac
+            dur += g * frac
+            if saturated:
+                # Displaced prefills collectively lose one bin-duration of progress.
+                ext += g * frac
+            b += 1
+        return dur, ext, k_peak
+
+    def _cost_k(self, tw, t_remain, K, srv, occ, s_bin, params, contended):
+        """Pallas objective evaluated against the planned occupancy; returns
+        (J, stream_suffix, prefill_duration)."""
         c, rd, T0 = params.kv_mb_per_token, params.decode_rate, params.activation_latency_proactive
-        if self.planned_k:
-            rp, bw = srv.prefill_share(k), srv.backhaul_bw / k
-        else:
-            rp, bw = self.obs_rp[srv.id], self.obs_bw[srv.id]
         L_hist = K + rd * (t_remain - tw)
-        T_hist = L_hist / rp
+        if self.planned_k:
+            T_hist, T_ext, k = self._fluid_prefill(occ[0], occ[1], s_bin, L_hist, srv, contended)
+            rp = L_hist / T_hist
+        else:
+            rp, k = self.obs_rp[srv.id], 1
+            T_hist, T_ext = L_hist / rp, 0.0
+        bw = srv.backhaul_bw / k if self.planned_k else self.obs_bw[srv.id]
         T_res_stream = max(0.0, rd * tw * c / bw - tw)
         stream = True
         T_res = T_res_stream
@@ -282,7 +335,10 @@ class Coordinated(PallasApprox):
                 T_res, stream = T_res_defer, False
         T_sit = T0 + max(0.0, T_hist - tw, T_res)
         T_early = max(0.0, tw - T_hist)
-        return self.alpha * T_sit + (1 - self.alpha) * T_early, stream
+        J = self.alpha * T_sit + (1 - self.alpha) * T_early
+        if self.social:
+            J += self.beta * T_ext
+        return J, stream, T_hist
 
     def reset(self):
         super().reset()
@@ -300,35 +356,30 @@ class Coordinated(PallasApprox):
         # Extend past the last deadline so that residual (post-handover) prefill of
         # short-window plans is visible as GPU occupancy to later plans.
         nbins = max(2, int((horizon + self.t_max) / g) + 2)
-        # GPU occupancy: bins in which a prefix prefill is expected to be running.
-        # Streaming-only preparations (prefix done) do not occupy the GPU.
-        occ = [0] * nbins
-        v1 = srv.prefill_speed
+        # GPU occupancy as intervals (lo_bin, hi_bin, deadline): bins in which a
+        # prefix prefill is expected to be running. Streaming-only preparations
+        # (prefix done) do not occupy the GPU.
+        intervals = []
 
-        def span(start_bin, dur_s):
-            # half-open bin range covering [start, start + dur)
-            return max(0, start_bin), min(nbins, start_bin + max(1, math.ceil(dur_s / g - 1e-9)))
+        def occupy(start_bin, dur_s, deadline):
+            lo = max(0, start_bin)
+            hi = min(nbins, start_bin + max(1, math.ceil(dur_s / g - 1e-9)))
+            intervals.append((lo, hi, deadline))
 
-        def occupy(start_bin, dur_s):
-            lo, hi = span(start_bin, dur_s)
-            for b in range(lo, hi):
-                occ[b] += 1
+        def profile(deadline):
+            n_early, n_late = [0] * nbins, [0] * nbins
+            for lo, hi, d in intervals:
+                arr = n_early if d <= deadline + 1e-9 else n_late
+                for b in range(lo, hi):
+                    arr[b] += 1
+            return n_early, n_late
 
         for prep in active:
-            if self.occ_mode == "window":
-                occupy(0, max(0.0, prep.deadline_t - t))
-            elif prep.prefix_remaining > 0:
-                occupy(0, prep.prefix_remaining / v1)
+            if prep.prefix_remaining > 0:
+                # Remaining prefill under the sharing it currently sees.
+                occupy(0, prep.prefix_remaining / srv.prefill_share(len(active)), prep.deadline_t)
         for pl in kept:
-            occupy(int((pl["start"] - t) / g), pl["dur"] if self.occ_mode != "window" else pl["tw"])
-
-        def window_slot(tw, t_remain, K):
-            s_bin = max(0, int((t_remain - tw) / g))
-            L_hist = K + params.decode_rate * (t_remain - tw)
-            dur = tw if self.occ_mode == "window" else L_hist / v1
-            lo, hi = span(s_bin, dur)
-            k = 1 + max(occ[lo:hi]) if contended and hi > lo else 1
-            return s_bin, dur, k
+            occupy(int((pl["start"] - t) / g), pl["dur"], pl["t_ho"])
 
         new_plans, triggers = {}, []
         for u, pred in sorted(cands, key=lambda up: up[1].t_ho):
@@ -336,18 +387,15 @@ class Coordinated(PallasApprox):
             if t_remain <= 0:
                 continue
             limit = min(self.t_max, t_remain)
+            occ = profile(pred.t_ho)
             best = None   # (J, tw, start_bin, prefill_dur, stream)
-            for capped in (True, False):
-                for tw in self._windows(limit):
-                    s_bin, dur, k = window_slot(tw, t_remain, u.tokens)
-                    if not capped or k <= self.k_max:
-                        j, stream = self._cost_k(tw, t_remain, u.tokens, srv, k, params, contended)
-                        if best is None or j < best[0] - 1e-12:
-                            best = (j, tw, s_bin, dur, stream)
-                if best is not None:
-                    break                    # no slot under the cap -> uncapped fallback
+            for tw in self._windows(limit):
+                s_bin = max(0, int((t_remain - tw) / g))
+                j, stream, dur = self._cost_k(tw, t_remain, u.tokens, srv, occ, s_bin, params, contended)
+                if best is None or j < best[0] - 1e-12:
+                    best = (j, tw, s_bin, dur, stream)
             _, tw, s_bin, dur, stream = best
-            occupy(s_bin, dur)
+            occupy(s_bin, dur, pred.t_ho)
             new_plans[u.id] = dict(target=srv.id, t_ho=pred.t_ho, start=pred.t_ho - tw,
                                    tw=tw, dur=dur, stream=stream)
             if self._fire_now(t_remain, tw, dt):   # same trigger rule as Pallas
@@ -424,8 +472,8 @@ def ablation_ladder():
     """Coordinated variants adding one mechanism at a time. 'abl-+edf' is the full
     method without detour; 'abl-+detour' equals `coordinated`."""
     return [
-        Coordinated(label="abl-planned-k", k_max=None, suffix_mode=False, edf=False, detour=False),
-        Coordinated(label="abl-+cap", suffix_mode=False, edf=False, detour=False),
+        Coordinated(label="abl-planned-k", social=False, suffix_mode=False, edf=False, detour=False),
+        Coordinated(label="abl-+social", suffix_mode=False, edf=False, detour=False),
         Coordinated(label="abl-+suffix", edf=False, detour=False),
         Coordinated(label="abl-+edf", detour=False),
         Coordinated(label="abl-+detour"),
