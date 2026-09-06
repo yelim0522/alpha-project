@@ -20,14 +20,17 @@ MEC(멀티액세스 엣지 컴퓨팅)를 메인 주제로 하는 논문 작업 �
 처리 방식·prefill 순서·VRAM 승인·migrate/detour 선택을 공동 결정하는 조율**에 있습니다.
 경합이 없으면 Pallas와 같은 결정으로 수렴하는, Pallas의 다중 사용자 일반화입니다.
 
-- `paper/draft.md` — 논문 초안 v0.3(서론·관련연구·시스템 모델·herding 진단·제안·pilot 결과·한계)
+- `paper/draft.md` — 논문 초안 v0.4(서론·관련연구·시스템 모델·herding 정식화·문제 정의·제안·보정/재현·밀도 스윕·ablation·최적해 격차·한계)
 - `paper/references.md` — 참고문헌(주 베이스라인 Pallas, 보조 베이스라인 ctHO)
-- `sim/` — 표준 라이브러리 기반 이산시간 시뮬레이터(공유 GPU/링크 자원 모델, 6개 정책 비교)
+- `sim/` — 표준 라이브러리 기반 이산시간 시뮬레이터. Pallas 공개 수치(Table 1, Fig. 8(a))에 ±10%로 보정된 자원 모델, 6개 정책 + ablation 사다리, Pallas 재현/외삽 스크립트, 소규모 최적해 격차 스크립트
 
 ### 빠른 실행
 
 ```bash
-cd sim && python3 run.py                       # 기본: 64명, 플래툰 8, 서버 6
-python3 run.py --sweep-users 16,32,64,128      # 밀도 스윕(herding 재현)
+cd sim && python3 run.py                       # 기본: 64명, 플래툰 8, 서버 6, Qwen3-32B
+python3 run.py --sweep-users 32,64,128,192 --seeds 3   # 밀도 스윕(herding 재현)
+python3 run.py --ablation --seeds 3            # 제안 메커니즘 사다리
 python3 run.py --controlled --seeds 3          # Pallas 재조정 변형 통제실험
+python3 reproduce_pallas.py                    # Pallas Table 1·Fig 8(a) 재현 + K>4 외삽
+python3 optgap.py                              # K=3–5 전수 탐색 대비 격차
 ```
