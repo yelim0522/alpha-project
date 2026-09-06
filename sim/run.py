@@ -6,9 +6,10 @@ Run:  python3 run.py
       python3 run.py --users 128 --group 16         # denser platoons (herding up)
       python3 run.py --sweep-users 32,64,128,192    # density sweep
       python3 run.py --controlled                   # Pallas re-tuning variants
-      python3 run.py --seeds 5                      # average over seeds
-Default parameters are calibrated to the numbers published for Pallas
-(Qwen3-32B: 256 KiB/token, ~2000 tok/s prefill, ~15 tok/s decode, 300 Mbps link).
+      python3 run.py --ablation                     # coordinated mechanism ladder
+      python3 run.py --model qwen14b --seeds 5      # other model preset, seed average
+Model presets (c, prefill rate, decode rate, T0) are calibrated to the numbers
+published for Pallas; see environment.MODEL_PRESETS and reproduce_pallas.py.
 """
 
 import argparse
@@ -16,12 +17,19 @@ import random
 from typing import Dict, List
 
 from environment import (
-    Server, User, CostParams, LinkLoad, nearest_server, advance_preparations,
+    Server, User, CostParams, LinkLoad, MODEL_PRESETS, nearest_server, advance_preparations,
 )
 from mobility import RandomWaypoint, GroupFlow
 from metrics import Metrics
-from policies import all_policies, PallasApprox, Coordinated, Decision
+from policies import all_policies, ablation_ladder, PallasApprox, Coordinated, Decision
 from prediction import predict_all
+
+
+def make_params(cfg) -> CostParams:
+    return CostParams(kv_mb_per_token=cfg.kv_mb_per_token, decode_rate=cfg.decode_rate,
+                      activation_latency=cfg.t0_reactive,
+                      activation_latency_proactive=cfg.t0_proactive,
+                      activation_serial=cfg.activation_serial, itl_base_ms=cfg.itl_ms)
 
 
 def build_servers(cfg, rng) -> List[Server]:
@@ -34,7 +42,8 @@ def build_servers(cfg, rng) -> List[Server]:
             if idx >= m:
                 break
             servers.append(Server(idx, (c + 0.5) * cfg.width / cols, (r + 0.5) * cfg.height / rows,
-                                  cfg.coverage, cfg.prefill_speed, cfg.backhaul_bw, cfg.vram_mb))
+                                  cfg.coverage, cfg.prefill_speed, cfg.backhaul_bw, cfg.vram_mb,
+                                  cfg.prefill_parallel))
             idx += 1
     return servers
 
@@ -72,8 +81,7 @@ def precompute_trace(cfg, servers):
 def run_policy(policy, cfg, server_list, trace) -> dict:
     policy.reset()
     servers: Dict[int, Server] = {s.id: s for s in server_list}
-    params = CostParams(kv_mb_per_token=cfg.kv_mb_per_token, decode_rate=cfg.decode_rate,
-                        activation_latency=cfg.activation_latency)
+    params = make_params(cfg)
     users = [User(id=i, x=0.0, y=0.0) for i in range(cfg.users)]
     metrics = Metrics()
     prev_loads = {sid: LinkLoad() for sid in servers}
@@ -103,12 +111,14 @@ def run_policy(policy, cfg, server_list, trace) -> dict:
         for sid, lst in pending.items():
             srv, ld, bg = servers[sid], loads[sid], prev_loads[sid]
             n_rec = len(lst)
-            # Preparations of the very users handing over now are no longer competing
-            # with their own residual recovery.
-            own = sum(1 for u, _ in lst if u.prep is not None and u.prep.target == sid
-                      and u.prep.prefix_remaining > 0)
-            v_share = srv.prefill_speed / max(1, n_rec + bg.prefills - own)
+            # GPU is shared by users recovering reactively (no usable preparation)
+            # plus the prefills already in flight (which include unfinished prefixes
+            # of the users handing over now). Activating a finished prefix is not a
+            # prefill and does not dilute the share.
+            n_gpu = sum(1 for u, _ in lst if u.prep is None or u.prep.target != sid)
+            v_share = srv.prefill_share(n_gpu + bg.prefills)
             bw_share = srv.backhaul_bw / max(1, n_rec + bg.streams)
+            activations = 0
             for u, dst in lst:
                 is_pingpong = any(s == dst.id and t - ts <= cfg.pingpong_window
                                   for s, ts in u.history[:-1])
@@ -117,10 +127,14 @@ def run_policy(policy, cfg, server_list, trace) -> dict:
                 else:
                     dec = policy.plan_handover(u, dst, params, v_share, bw_share,
                                                is_pingpong, prev_preds.get(u.id), t)
+                if dec.used_prep:
+                    # Prepared requests are activated one after another at the target.
+                    dec.sit += activations * params.activation_serial
+                    activations += 1
                 early = None
                 if u.prep is not None and u.prep.target == dst.id and u.prep.prefix_done_t is not None:
                     early = t - u.prep.prefix_done_t
-                metrics.record_handover(dec, is_pingpong, early)
+                metrics.record_handover(dec, is_pingpong, early, u.id)
                 ld.demand_mb += dec.transfer_mb
                 ld.sent_mb += dec.transfer_mb
                 if dec.transfer_mb > 0:
@@ -158,9 +172,9 @@ def run_policy(policy, cfg, server_list, trace) -> dict:
         for u in users:
             p = u.prep
             if p is not None and p.target == u.server and p.prefix_remaining <= 0:
-                v_share = servers[u.server].prefill_speed / max(1, loads[u.server].prefills + 1)
-                sit = params.activation_latency + p.unsent_suffix_tokens(c) / v_share
-                metrics.record_settle(sit)
+                v_share = servers[u.server].prefill_share(loads[u.server].prefills + 1)
+                sit = params.activation_latency_proactive + p.unsent_suffix_tokens(c) / v_share
+                metrics.record_settle(sit, u.id)
                 loads[u.server].prefills += 1
                 u.anchor, u.hops, u.prep = u.server, 0, None
 
@@ -176,15 +190,17 @@ COLUMNS = [
     ("SITavg", 7, "sit_mean_s", 3),
     ("SITp99", 7, "sit_p99_s", 3),
     ("SITmax", 7, "sit_max_s", 3),
+    ("prep%", 5, "prep_rate_pct", None),
+    ("SITprep", 7, "sit_prep_s", 3),
+    ("prp99", 6, "sit_prep_p99_s", 2),
+    ("SITnoprp", 8, "sit_noprep_s", 3),
     ("ITLms", 6, "itl_ms", 1),
     ("pkStrm", 6, "peak_streams", None),
-    ("pkMB/s", 7, "peak_mbps", 1),
     ("CoV", 5, "load_cov", 2),
+    ("Jain", 5, "jain", 2),
     ("early", 6, "early_s", 2),
     ("wasteMB", 8, "wasted_mb", 0),
-    ("xferMB", 8, "transfer_mb", 0),
     ("detour", 6, "detours", None),
-    ("pingpong", 8, "pingpong", None),
 ]
 
 
@@ -210,8 +226,13 @@ def policies_for(cfg):
         pols += [PallasApprox(t_max=15.0, label="pallas-tmax15"),
                  PallasApprox(alpha=0.5, label="pallas-a0.5"),
                  PallasApprox(ewma=0.95, t_max=15.0, label="pallas-fastobs"),
-                 Coordinated(k_max=999, label="coord-nocap"),
+                 Coordinated(k_max=None, label="coord-nocap"),
+                 Coordinated(k_max=2, label="coord-k2"),
+                 Coordinated(k_max=8, label="coord-k8"),
+                 Coordinated(occ_mode="window", label="coord-occwin"),
                  Coordinated(stream_util=9.0, label="coord-stream")]
+    if cfg.ablation:
+        pols += ablation_ladder()
     return pols
 
 
@@ -239,15 +260,29 @@ def main():
     ap.add_argument("--mobility", choices=["flow", "rwp"], default="flow")
     ap.add_argument("--group", type=int, default=8, help="platoon size for --mobility flow")
     ap.add_argument("--backhaul-mbps", type=float, default=300.0)
-    ap.add_argument("--prefill-speed", type=float, default=2000.0)
-    ap.add_argument("--decode-rate", type=float, default=15.0)
-    ap.add_argument("--kv-kib", type=float, default=256.0, help="KV bytes per token (KiB)")
+    ap.add_argument("--model", choices=sorted(MODEL_PRESETS), default="qwen32b",
+                    help="model preset (KV size, prefill/decode rate, T0); individual flags override")
+    ap.add_argument("--prefill-speed", type=float, default=None, help="per-request prefill tok/s")
+    ap.add_argument("--prefill-parallel", type=float, default=4.0,
+                    help="aggregate GPU prefill capacity as a multiple of --prefill-speed")
+    ap.add_argument("--decode-rate", type=float, default=None)
+    ap.add_argument("--kv-kib", type=float, default=None, help="KV bytes per token (KiB)")
+    ap.add_argument("--activation-serial", type=float, default=0.04)
     ap.add_argument("--vram-mb", type=float, default=6000.0)
     ap.add_argument("--pred-speed-noise", type=float, default=0.0)
     ap.add_argument("--pred-heading-noise", type=float, default=0.0)
     ap.add_argument("--controlled", action="store_true", help="add Pallas/coordinated re-tuning variants")
+    ap.add_argument("--ablation", action="store_true", help="add the coordinated mechanism ladder")
     ap.add_argument("--sweep-users", type=str, default="", help="comma list, e.g. 32,64,128")
     cfg = ap.parse_args()
+
+    preset = MODEL_PRESETS[cfg.model]
+    cfg.kv_kib = cfg.kv_kib if cfg.kv_kib is not None else preset["kv_kib"]
+    cfg.prefill_speed = cfg.prefill_speed if cfg.prefill_speed is not None else preset["prefill_speed"]
+    cfg.decode_rate = cfg.decode_rate if cfg.decode_rate is not None else preset["decode_rate"]
+    cfg.itl_ms = preset["itl_ms"]
+    cfg.t0_reactive = preset["t0_reactive"]
+    cfg.t0_proactive = preset["t0_proactive"]
 
     cfg.width = cfg.height = 1000.0
     cfg.coverage = 320.0
@@ -255,17 +290,17 @@ def main():
     cfg.max_context = 4500.0
     cfg.kv_mb_per_token = cfg.kv_kib / 1024.0
     cfg.backhaul_bw = cfg.backhaul_mbps / 8.0     # MB/s
-    cfg.activation_latency = 0.15
     cfg.pingpong_window = 20.0
     cfg.pred_horizon = 20.0
-    cfg.pred_step = 1.0
+    cfg.pred_step = cfg.dt
 
     sweep = [int(x) for x in cfg.sweep_users.split(",") if x] or [cfg.users]
     for n in sweep:
         cfg.users = n
         print(f"scenario: {cfg.users} users ({cfg.mobility}, group={cfg.group}), {cfg.servers} servers, "
               f"{cfg.steps}x{cfg.dt}s, speed={cfg.speed} m/s, link={cfg.backhaul_mbps} Mbps, "
-              f"seeds={cfg.seeds}\n")
+              f"model={cfg.model} (c={cfg.kv_kib:.0f} KiB, v1={cfg.prefill_speed:.0f} tok/s, "
+              f"x{cfg.prefill_parallel:.0f} batched), seeds={cfg.seeds}\n")
         print_table(run_scenario(cfg))
         print()
 

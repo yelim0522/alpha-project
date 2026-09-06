@@ -10,10 +10,17 @@ over the inter-gNB backhaul. Proactive policies may start this preparation
 
 Resource model (this is where multi-user effects live):
   - Each server m has one ingress backhaul link of capacity B_m (MB/s) and one
-    GPU with prefill throughput v_m (tokens/s). Both are shared by every
-    preparation/recovery currently directed at m.
+    GPU. A single prefill achieves v_m tokens/s (per-request rate, limited by
+    kernel-launch/underutilisation at a few thousand tokens); concurrent
+    prefills are batched, so the GPU sustains up to `prefill_parallel` x v_m in
+    aggregate before per-request rates start to shrink. This two-level model is
+    what Pallas's own concurrency data implies (ctHO worst-user grows only
+    442 -> 507 ms from K=1 to K=4 at 1 Gbps, i.e. prefill is not yet shared).
   - Prefill is served in an order chosen by the policy (FCFS by default, EDF for
     the coordinated policy); suffix streams share the link fairly (TCP-like).
+  - Activating a prepared request (final block sync + assembly + first decode
+    step) costs T0_proactive and is serialised per target: the i-th request
+    activated in the same control cycle waits an extra (i-1) x activation_serial.
   - A preparation (`Prep`) follows the Pallas structure: at trigger time the
     context is split into a stable prefix (recomputed at the target) and an
     evolving suffix (tokens generated after the trigger), which is either
@@ -31,9 +38,16 @@ class Server:
     x: float
     y: float
     coverage: float          # coverage radius (m)
-    prefill_speed: float     # v_m, tokens/s available for prefill
+    prefill_speed: float     # v_m, tokens/s a single prefill request achieves
     backhaul_bw: float       # B_m, MB/s ingress capacity of the inter-gNB link
     vram_budget_mb: float    # VRAM the server lends to early-prepared migration state
+    prefill_parallel: float = 4.0   # aggregate GPU prefill capacity = prefill_parallel * v_m
+
+    def prefill_share(self, n: int) -> float:
+        """Per-request prefill rate when n requests prefill concurrently."""
+        if n <= 0:
+            return self.prefill_speed
+        return min(self.prefill_speed, self.prefill_speed * self.prefill_parallel / n)
 
 
 @dataclass
@@ -79,11 +93,27 @@ class User:
 
 @dataclass
 class CostParams:
-    kv_mb_per_token: float = 0.25      # c: 256 KiB/token (Qwen3-32B, BF16)
-    decode_rate: float = 15.0          # r_d: tokens/s generated per session
-    activation_latency: float = 0.15   # T0: assembly + activation + first step (s)
-    itl_base_ms: float = 67.0          # ITL when served locally
-    itl_hop_penalty_ms: float = 40.0   # extra ITL per forwarding hop (Detour)
+    kv_mb_per_token: float = 0.25          # c: 256 KiB/token (Qwen3-32B, BF16)
+    decode_rate: float = 15.0              # r_d: tokens/s generated per session
+    activation_latency: float = 0.075      # T0 of post-handover recovery paths (s)
+    activation_latency_proactive: float = 0.32  # T0 of a prepared request: final sync + assembly
+    activation_serial: float = 0.04        # extra wait per additional activation in the same cycle
+    itl_base_ms: float = 67.0              # ITL when served locally
+    itl_hop_penalty_ms: float = 40.0       # extra ITL per forwarding hop (Detour)
+
+
+# Per-model presets. c follows the architecture (2*layers*kv_heads*head_dim*2B);
+# v1 and T0 are fitted to Pallas's published single-user numbers (Table 1 for
+# Qwen3-32B; ctHO K=1 and Pallas K=1 in Fig. 8a for Qwen3-14B); Llama-3-8B is
+# extrapolated from Table 2 ratios. decode_rate/itl follow Table 2 ITL.
+MODEL_PRESETS = {
+    "qwen32b": dict(kv_kib=256.0, prefill_speed=1970.0, decode_rate=15.0, itl_ms=67.0,
+                    t0_reactive=0.075, t0_proactive=0.32),
+    "qwen14b": dict(kv_kib=160.0, prefill_speed=4700.0, decode_rate=22.0, itl_ms=45.5,
+                    t0_reactive=0.075, t0_proactive=0.236),
+    "llama8b": dict(kv_kib=128.0, prefill_speed=7600.0, decode_rate=40.0, itl_ms=25.0,
+                    t0_reactive=0.06, t0_proactive=0.154),
+}
 
 
 @dataclass
@@ -194,15 +224,17 @@ def advance_preparations(users: List[User], servers: Dict[int, Server], params: 
         srv = servers[sid]
         load = loads[sid]
 
-        # GPU: prefill budget v*dt tokens, served in policy-defined order.
-        budget = srv.prefill_speed * dt
+        # GPU: each request is capped at v*dt tokens per step; the batch as a whole
+        # at prefill_parallel*v*dt, handed out in policy-defined order.
+        cap = srv.prefill_speed * dt
+        budget = cap * srv.prefill_parallel
         queue = sorted((p for p in preps if p.prefix_remaining > 0),
                        key=lambda p: order_key(p, t))
         load.prefills = len(queue)
         for p in queue:
             if budget <= 0:
                 break
-            done = min(p.prefix_remaining, budget)
+            done = min(p.prefix_remaining, cap, budget)
             p.prefix_remaining -= done
             budget -= done
             if p.prefix_remaining <= 1e-9:
