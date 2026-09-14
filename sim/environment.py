@@ -87,8 +87,16 @@ class User:
     hops: int = 0                # forwarding hops between anchor and serving server
     epoch: int = 0
     prep: Optional[Prep] = None
+    hedge_preps: Dict[int, Prep] = field(default_factory=dict)
     respawned: bool = False      # set by the mobility model when the user re-enters the area
     history: List = field(default_factory=list)  # [(server_id, time), ...]
+    # Optional conversation-cycle state used only by the turn-boundary experiment.
+    turn_remaining_s: float = 0.0
+    think_remaining_s: float = 0.0
+    next_think_s: float = 0.0
+    generated_tokens_step: float = -1.0  # <0 means the legacy continuous decode model
+    boundary_crossed_step: bool = False
+    boundary_gap_s: float = 0.0
 
 
 @dataclass
@@ -214,15 +222,17 @@ def advance_preparations(users: List[User], servers: Dict[int, Server], params: 
                          ) -> Dict[int, LinkLoad]:
     """Advance every active Prep by dt under shared GPU/link capacity."""
     loads: Dict[int, LinkLoad] = {sid: LinkLoad() for sid in servers}
-    by_target: Dict[int, List[Prep]] = {}
+    by_target: Dict[int, List] = {}
     for u in users:
-        if u.prep is not None:
-            by_target.setdefault(u.prep.target, []).append(u.prep)
+        preps = ([u.prep] if u.prep is not None else []) + list(u.hedge_preps.values())
+        for prep in preps:
+            by_target.setdefault(prep.target, []).append((u, prep))
 
     c = params.kv_mb_per_token
-    for sid, preps in by_target.items():
+    for sid, owned_preps in by_target.items():
         srv = servers[sid]
         load = loads[sid]
+        preps = [prep for _, prep in owned_preps]
 
         # GPU: each request is capped at v*dt tokens per step; the batch as a whole
         # at prefill_parallel*v*dt, handed out in policy-defined order.
@@ -242,8 +252,9 @@ def advance_preparations(users: List[User], servers: Dict[int, Server], params: 
                 p.prefix_done_t = t + dt
 
         # Source keeps decoding: suffix grows for every prep.
-        for p in preps:
-            gen = params.decode_rate * dt
+        for u, p in owned_preps:
+            gen = (u.generated_tokens_step if u.generated_tokens_step >= 0
+                   else params.decode_rate * dt)
             p.suffix_tokens += gen
             if p.stream_suffix:
                 p.suffix_backlog_mb += gen * c
@@ -263,5 +274,9 @@ def advance_preparations(users: List[User], servers: Dict[int, Server], params: 
 
 
 def vram_in_use(users: List[User], target: int, c: float) -> float:
-    return sum(u.prep.vram_mb(c) for u in users
-               if u.prep is not None and u.prep.target == target)
+    total = 0.0
+    for u in users:
+        if u.prep is not None and u.prep.target == target:
+            total += u.prep.vram_mb(c)
+        total += sum(p.vram_mb(c) for p in u.hedge_preps.values() if p.target == target)
+    return total

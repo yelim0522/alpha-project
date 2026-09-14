@@ -45,6 +45,12 @@ class Metrics:
     per_user_sit: Dict[int, List[float]] = field(default_factory=dict)
     sits_prepared: List[float] = field(default_factory=list)    # migrations that used a preparation
     sits_unprepared: List[float] = field(default_factory=list)  # reactive fallbacks
+    hedge_copies: int = 0
+    hedge_hits: int = 0
+    hedge_alt_hits: int = 0
+    boundary_moves: int = 0
+    boundary_hidden: int = 0
+    boundary_wait_s: float = 0.0
 
     def record_handover(self, decision, is_pingpong: bool, early, user_id: int = -1):
         self.handover_count += 1
@@ -82,6 +88,20 @@ class Metrics:
     def record_cancel(self, prep, c: float):
         self.cancels += 1
         self.wasted_mb += prep.vram_mb(c)
+
+    def record_hedge_copy(self):
+        self.hedge_copies += 1
+
+    def record_hedge_hit(self, alternate=False):
+        self.hedge_hits += 1
+        if alternate:
+            self.hedge_alt_hits += 1
+
+    def record_boundary_move(self, wait_s: float):
+        self.boundary_moves += 1
+        self.boundary_wait_s += wait_s
+        if wait_s <= 1e-9:
+            self.boundary_hidden += 1
 
     def record_itl(self, users, params):
         for u in users:
@@ -130,4 +150,15 @@ class Metrics:
             "load_cov": cov,
             "jain": self.jain_index(),
             "transfer_mb": self.transferred_mb,
+            "hedge_copies": self.hedge_copies,
+            "hedge_hits": self.hedge_hits,
+            "hedge_hit_pct": 100.0 * self.hedge_hits / self.handover_count
+                             if self.handover_count else 0.0,
+            "hedge_alt_hit_pct": 100.0 * self.hedge_alt_hits / self.handover_count
+                                 if self.handover_count else 0.0,
+            "boundary_moves": self.boundary_moves,
+            "boundary_hidden_pct": 100.0 * self.boundary_hidden / self.boundary_moves
+                                   if self.boundary_moves else 0.0,
+            "boundary_wait_s": self.boundary_wait_s / self.boundary_moves
+                               if self.boundary_moves else 0.0,
         }

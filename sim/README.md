@@ -19,6 +19,7 @@ python3 run.py --users 12 --group 1             # 저경합: 제안 = Pallas 수
 python3 reproduce_pallas.py                     # Pallas Table 1·Fig 8(a) 재현 + K>4 외삽
 python3 optgap.py                               # 소규모 인스턴스 최적해 대비 격차(brute force)
 python3 regime_map.py --seeds 3 --csv out.csv   # 체제 지도: 문맥×사용자, 잡음×사용자, 백홀×문맥 (약 30분)
+python3 alternatives.py --seeds 3 --csv alternatives.csv  # 턴 경계·다중 후보 헤징·이상적 KV 압축
 ```
 
 출력 열: `HO` 핸드오버 수, `SITavg/p99/max` 서비스 중단 시간(s), `prep%` 준비를 사용한
@@ -67,6 +68,8 @@ python3 regime_map.py --seeds 3 --csv out.csv   # 체제 지도: 문맥×사용�
 | `detour` | 소스 유지 + 포워딩 | 연속성 극단 |
 | `pallas-approx` | 사용자별 window 그리드 탐색(관측 EWMA 유효율), prefix FCFS + suffix 스트리밍, 타겟 변경 시 취소 | **주 베이스라인** |
 | `coordinated` | 타겟 단위 공동 계획: 계획된 GPU 점유 프로파일로 window별 완료 시각을 유체 모델(EDF 인지)로 계산하고, 다른 준비에 주는 지연(외부효과, 가중 β)을 비용에 더해 트리거를 시간축으로 분산. 계획은 예측이 바뀌기 전까지 유지. suffix 모드 선택(stream/defer), EDF prefill, VRAM 승인, 예측 불일치·핑퐁 시 detour + settle | **제안** |
+| `turn-boundary` | 현재 턴은 소스에서 포워딩하고 생성 종료 후 think interval에 ctHO 복구. think time을 넘는 부분만 SIT | **대안 비교군** |
+| `pallas-hedge2` | noisy-CVH ensemble의 상위 2개 타겟에 prefix/suffix를 모두 준비. 복제본도 실제 GPU·백홀·VRAM을 소모하고 loser는 낭비로 계산 | **대안 비교군** |
 
 두 선제 정책은 같은 window 격자(0.2 s), 같은 목적함수(α=0.8), 같은 `T_max`(5 s), 같은
 트리거 규칙을 쓰며, 후보가 하나이고 활성 준비가 없으면 `coordinated`는 `pallas-approx`와
@@ -97,6 +100,9 @@ python3 regime_map.py --seeds 3 --csv out.csv   # 체제 지도: 문맥×사용�
 - `optgap.py` — K=3–5 인스턴스에서 트리거 스케줄 전수 탐색 대비 격차
 - `regime_map.py` — 문맥 길이·사용자 수·예측 잡음·백홀 대역폭 격자에서 ctHO/Pallas/제안의 승자 지도.
   셀마다 SIT 평균·p99, 비율 격자(Pallas/ctHO, 제안/Pallas), Detour의 ITL 페널티를 출력(`--csv`)
+- `alternatives.py` — (T/T2) 턴 경계 및 think-time 민감도, (H) 예측 잡음별 top-2 헤징,
+  (K) 이상적 KV 압축률(1, 1/2, 1/4, 1/8) 비교. 압축은 코덱 오버헤드를 빼 압축에
+  유리한 upper bound이며, 턴 모델 기본값은 output 128 tokens / think 4 s이다.
 
 ## 루프 순서(주의)
 

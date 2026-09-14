@@ -9,9 +9,17 @@ Optional noise on speed/heading stresses prediction robustness.
 from dataclasses import dataclass
 import math
 import random
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from environment import Server, User, distance, nearest_server_at
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """One possible next cell from an ensemble mobility prediction."""
+    target: int
+    t_ho: float
+    probability: float
 
 
 @dataclass
@@ -19,6 +27,7 @@ class Prediction:
     target: int      # predicted next serving server
     t_ho: float      # predicted handover time (absolute)
     margin: float    # confidence proxy in [0, 1]: how clearly the target wins
+    candidates: Tuple[Candidate, ...] = ()
 
 
 def predict(user: User, servers: List[Server], t: float, horizon: float, step: float,
@@ -53,11 +62,48 @@ def predict(user: User, servers: List[Server], t: float, horizon: float, step: f
 
 def predict_all(users: List[User], servers: List[Server], t: float, horizon: float,
                 step: float, rng: Optional[random.Random] = None,
-                speed_noise: float = 0.0, heading_noise: float = 0.0
+                speed_noise: float = 0.0, heading_noise: float = 0.0,
+                candidate_count: int = 1, candidate_samples: int = 1
                 ) -> Dict[int, Prediction]:
     out = {}
     for u in users:
-        p = predict(u, servers, t, horizon, step, rng, speed_noise, heading_noise)
+        if candidate_count > 1 and candidate_samples > 1:
+            p = predict_candidates(u, servers, t, horizon, step, rng, speed_noise,
+                                   heading_noise, candidate_count, candidate_samples)
+        else:
+            p = predict(u, servers, t, horizon, step, rng, speed_noise, heading_noise)
         if p is not None:
             out[u.id] = p
     return out
+
+
+def predict_candidates(user: User, servers: List[Server], t: float, horizon: float,
+                       step: float, rng: Optional[random.Random], speed_noise: float,
+                       heading_noise: float, candidate_count: int = 2,
+                       samples: int = 16) -> Optional[Prediction]:
+    """Return the top next-cell hypotheses from a noisy trajectory ensemble.
+
+    Probability is the fraction of *all* samples voting for a target, so missing
+    handovers inside the horizon retain their uncertainty mass instead of being
+    silently renormalised away.
+    """
+    if speed_noise <= 0 and heading_noise <= 0:
+        p = predict(user, servers, t, horizon, step, rng, 0.0, 0.0)
+        if p is None:
+            return None
+        only = Candidate(p.target, p.t_ho, 1.0)
+        return Prediction(p.target, p.t_ho, 1.0, (only,))
+    votes: Dict[int, List[Prediction]] = {}
+    for _ in range(max(1, samples)):
+        p = predict(user, servers, t, horizon, step, rng, speed_noise, heading_noise)
+        if p is not None:
+            votes.setdefault(p.target, []).append(p)
+    if not votes:
+        return None
+    ranked = sorted(votes.items(), key=lambda item: (-len(item[1]), item[0]))
+    candidates = []
+    for target, preds in ranked[:max(1, candidate_count)]:
+        candidates.append(Candidate(target, sum(p.t_ho for p in preds) / len(preds),
+                                    len(preds) / max(1, samples)))
+    primary = candidates[0]
+    return Prediction(primary.target, primary.t_ho, primary.probability, tuple(candidates))

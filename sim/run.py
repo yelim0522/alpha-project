@@ -22,7 +22,8 @@ from environment import (
 )
 from mobility import RandomWaypoint, GroupFlow
 from metrics import Metrics
-from policies import all_policies, ablation_ladder, PallasApprox, Coordinated, Decision
+from policies import (all_policies, ablation_ladder, PallasApprox, Coordinated,
+                      HedgedPallas, TurnBoundary, Decision)
 from prediction import predict_all
 
 
@@ -59,6 +60,9 @@ def precompute_trace(cfg, servers):
     users = [User(id=i, x=rng.uniform(0, cfg.width), y=rng.uniform(0, cfg.height),
                   tokens=rng.uniform(cfg.min_context, cfg.max_context * 0.7))
              for i in range(cfg.users)]
+    if getattr(cfg, "turn_model", False):
+        for u in users:
+            _reset_conversation(u, cfg, rng, random_phase=True)
     pred_rng = random.Random(cfg.seed + 7)
     trace = []
     for t_idx in range(cfg.steps):
@@ -69,14 +73,65 @@ def precompute_trace(cfg, servers):
             if u.respawned:
                 # New session for a user re-entering the area.
                 u.tokens = rng.uniform(cfg.min_context, cfg.max_context * 0.7)
-            u.tokens = min(cfg.max_context, u.tokens + cfg.decode_rate * cfg.dt)
+                if getattr(cfg, "turn_model", False):
+                    _reset_conversation(u, cfg, rng, random_phase=True)
+            before_tokens = u.tokens
+            if getattr(cfg, "turn_model", False):
+                _advance_conversation(u, cfg, cfg.dt)
+                generated = max(0.0, u.tokens - before_tokens)
+            else:
+                u.tokens = min(cfg.max_context, u.tokens + cfg.decode_rate * cfg.dt)
+                generated = -1.0
             u.server = nearest_server(u, servers).id
-            snapshot.append((u.x, u.y, u.vx, u.vy, u.tokens, u.respawned))
+            snapshot.append((u.x, u.y, u.vx, u.vy, u.tokens, u.respawned,
+                             u.turn_remaining_s, u.think_remaining_s, u.next_think_s,
+                             generated, u.boundary_crossed_step, u.boundary_gap_s))
             u.respawned = False
         preds = predict_all(users, servers, t, cfg.pred_horizon, cfg.pred_step, pred_rng,
-                            cfg.pred_speed_noise, cfg.pred_heading_noise)
+                            cfg.pred_speed_noise, cfg.pred_heading_noise,
+                            getattr(cfg, "pred_candidates", 1),
+                            getattr(cfg, "pred_samples", 1))
         trace.append((snapshot, preds))
     return trace
+
+
+def _reset_conversation(user, cfg, rng, random_phase=False):
+    """Initialise the optional fixed-length generation/think cycle."""
+    gen_s = cfg.turn_output_tokens / cfg.decode_rate
+    think_s = cfg.think_time
+    phase = rng.uniform(0.0, gen_s + think_s) if random_phase else 0.0
+    if phase < gen_s:
+        user.turn_remaining_s = gen_s - phase
+        user.think_remaining_s = 0.0
+    else:
+        user.turn_remaining_s = 0.0
+        user.think_remaining_s = gen_s + think_s - phase
+    user.next_think_s = think_s
+
+
+def _advance_conversation(user, cfg, dt):
+    """Advance one user's generation/think cycle without policy-dependent timing."""
+    user.boundary_crossed_step = False
+    user.boundary_gap_s = 0.0
+    remaining = dt
+    while remaining > 1e-9:
+        if user.turn_remaining_s > 1e-9:
+            step = min(remaining, user.turn_remaining_s)
+            user.tokens = min(cfg.max_context, user.tokens + cfg.decode_rate * step)
+            user.turn_remaining_s -= step
+            remaining -= step
+            if user.turn_remaining_s <= 1e-9:
+                user.turn_remaining_s = 0.0
+                user.think_remaining_s = user.next_think_s
+                user.boundary_crossed_step = True
+                user.boundary_gap_s = user.next_think_s
+        else:
+            step = min(remaining, user.think_remaining_s)
+            user.think_remaining_s -= step
+            remaining -= step
+            if user.think_remaining_s <= 1e-9:
+                user.think_remaining_s = 0.0
+                user.turn_remaining_s = cfg.turn_output_tokens / cfg.decode_rate
 
 
 def run_policy(policy, cfg, server_list, trace) -> dict:
@@ -92,13 +147,19 @@ def run_policy(policy, cfg, server_list, trace) -> dict:
     for t_idx, (snap, preds) in enumerate(trace):
         t = t_idx * cfg.dt
         pending: Dict[int, list] = {}
-        for u, (x, y, vx, vy, tokens, respawned) in zip(users, snap):
+        for u, (x, y, vx, vy, tokens, respawned, turn_left, think_left, next_think,
+                generated, boundary_crossed, boundary_gap) in zip(users, snap):
             u.x, u.y, u.vx, u.vy, u.tokens = x, y, vx, vy, tokens
+            u.turn_remaining_s, u.think_remaining_s = turn_left, think_left
+            u.next_think_s = next_think
+            u.generated_tokens_step = generated
+            u.boundary_crossed_step, u.boundary_gap_s = boundary_crossed, boundary_gap
             here = nearest_server(u, servers.values())
             if u.server == -1 or respawned:
                 # Fresh session: state is born at the serving server, nothing to migrate.
                 if u.prep is not None:
                     u.prep, u.epoch = None, u.epoch + 1
+                u.hedge_preps.clear()
                 u.server = u.anchor = here.id
                 u.hops = 0
                 u.history = [(here.id, t)]
@@ -111,6 +172,8 @@ def run_policy(policy, cfg, server_list, trace) -> dict:
         loads = {sid: LinkLoad() for sid in servers}
         for sid, lst in pending.items():
             srv, ld, bg = servers[sid], loads[sid], prev_loads[sid]
+            for u, dst in lst:
+                policy.prepare_handover(u, dst, params, metrics, t)
             n_rec = len(lst)
             # GPU is shared by users recovering reactively (no usable preparation)
             # plus the prefills already in flight (which include unfinished prefixes
@@ -239,6 +302,8 @@ def policies_for(cfg):
                  Coordinated(stream_util=9.0, label="coord-stream")]
     if cfg.ablation:
         pols += ablation_ladder()
+    if getattr(cfg, "alternatives", False):
+        pols += [TurnBoundary(), HedgedPallas(max_candidates=cfg.pred_candidates)]
     return pols
 
 
@@ -277,6 +342,18 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--vram-mb", type=float, default=6000.0)
     ap.add_argument("--pred-speed-noise", type=float, default=0.0)
     ap.add_argument("--pred-heading-noise", type=float, default=0.0)
+    ap.add_argument("--pred-candidates", type=int, default=1,
+                    help="top next-cell hypotheses retained by ensemble prediction")
+    ap.add_argument("--pred-samples", type=int, default=1,
+                    help="trajectory samples used to estimate candidate probabilities")
+    ap.add_argument("--turn-model", action="store_true",
+                    help="alternate generation and think intervals for turn-boundary experiments")
+    ap.add_argument("--turn-output-tokens", type=float, default=128.0)
+    ap.add_argument("--think-time", type=float, default=4.0)
+    ap.add_argument("--kv-compression-ratio", type=float, default=1.0,
+                    help="ideal compressed/raw KV byte ratio (codec overhead omitted)")
+    ap.add_argument("--alternatives", action="store_true",
+                    help="add turn-boundary and multi-candidate hedging baselines")
     ap.add_argument("--controlled", action="store_true", help="add Pallas/coordinated re-tuning variants")
     ap.add_argument("--ablation", action="store_true", help="add the coordinated mechanism ladder")
     ap.add_argument("--sweep-users", type=str, default="", help="comma list, e.g. 32,64,128")
@@ -299,7 +376,14 @@ def finalize_cfg(cfg):
         cfg.min_context = 500.0
     if getattr(cfg, "max_context", None) is None:
         cfg.max_context = 4500.0
-    cfg.kv_mb_per_token = cfg.kv_kib / 1024.0
+    if not 0 < cfg.kv_compression_ratio <= 1:
+        raise ValueError("--kv-compression-ratio must be in (0, 1]")
+    if cfg.pred_candidates < 1 or cfg.pred_samples < 1:
+        raise ValueError("--pred-candidates and --pred-samples must be positive")
+    if cfg.turn_model and (cfg.turn_output_tokens <= 0 or cfg.think_time < 0):
+        raise ValueError("turn output must be positive and think time non-negative")
+    cfg.raw_kv_mb_per_token = cfg.kv_kib / 1024.0
+    cfg.kv_mb_per_token = cfg.raw_kv_mb_per_token * cfg.kv_compression_ratio
     cfg.backhaul_bw = cfg.backhaul_mbps / 8.0     # MB/s
     cfg.pingpong_window = 20.0
     cfg.pred_horizon = 20.0

@@ -57,6 +57,9 @@ class Policy:
                       predicted, t) -> Decision:
         raise NotImplementedError
 
+    def prepare_handover(self, user, dst, params, metrics, t):
+        """Hook for policies holding state for more than one candidate target."""
+
     # ----- shared helpers -------------------------------------------------- #
     @staticmethod
     def _reactive(user, dst, params, v_share, bw_share, how="hybrid") -> Decision:
@@ -124,6 +127,51 @@ class Detour(Policy):
 
     def plan_handover(self, user, dst, params, v_share, bw_share, is_pingpong, predicted, t):
         return Decision(0.0, 0.0, 0.0, "detour", False)
+
+
+class TurnBoundary(Policy):
+    """Keep serving from the old anchor until generation reaches a turn boundary.
+
+    Migration starts in the following think interval. Only the part that exceeds
+    that interval is user-visible SIT; tokens generated before the boundary pay
+    the same forwarding ITL as Detour. This deliberately optimistic baseline
+    ignores codec/startup overhead beyond the calibrated reactive migration cost.
+    """
+
+    name = "turn-boundary"
+    order_key = staticmethod(edf_key)
+
+    def plan_handover(self, user, dst, params, v_share, bw_share, is_pingpong, predicted, t):
+        return Decision(0.0, 0.0, 0.0, "detour", False)
+
+    def on_step(self, t, dt, users, servers, params, predictions, loads, metrics):
+        by_target: Dict[int, List[User]] = {}
+        for u in users:
+            at_boundary = u.turn_remaining_s <= 1e-9 or u.boundary_crossed_step
+            if u.hops > 0 and u.anchor != u.server and at_boundary:
+                by_target.setdefault(u.server, []).append(u)
+        c = params.kv_mb_per_token
+        for sid, due in by_target.items():
+            srv, load = servers[sid], loads[sid]
+            v_share = srv.prefill_share(len(due) + load.prefills)
+            bw_share = srv.backhaul_bw / max(1, len(due) + load.streams)
+            for u in due:
+                p = optimal_prefill_length(u.tokens, c, v_share, bw_share)
+                xfer_tokens = u.tokens - p
+                migration_s = params.activation_latency + handover_delay(
+                    p, xfer_tokens, c, v_share, bw_share)
+                gap_s = u.boundary_gap_s if u.boundary_crossed_step else u.think_remaining_s
+                wait_s = max(0.0, migration_s - gap_s)
+                metrics.record_settle(wait_s, u.id)
+                metrics.record_boundary_move(wait_s)
+                metrics.transferred_mb += c * xfer_tokens
+                load.demand_mb += c * xfer_tokens
+                load.sent_mb += c * xfer_tokens
+                if xfer_tokens > 0:
+                    load.streams += 1
+                if p > 0:
+                    load.prefills += 1
+                u.anchor, u.hops = u.server, 0
 
 
 # --------------------------------------------------------------------------- #
@@ -213,6 +261,90 @@ class PallasApprox(Policy):
                 srv = servers[pred.target]
                 if vram_in_use(users, pred.target, c) + u.tokens * c <= srv.vram_budget_mb:
                     self._trigger(u, pred.target, t, pred.t_ho, stream_suffix=True)
+
+    def plan_handover(self, user, dst, params, v_share, bw_share, is_pingpong, predicted, t):
+        if user.prep is not None and user.prep.target == dst.id:
+            return self._residual(user, dst, params, v_share, bw_share, allow_split=False)
+        return self._reactive(user, dst, params, v_share, bw_share, "hybrid")
+
+
+class HedgedPallas(PallasApprox):
+    """Pallas with full prefix/suffix preparation for up to N likely targets.
+
+    Candidate probabilities come from the shared noisy-trajectory ensemble. Each
+    copy consumes its target's real GPU, link, and VRAM budget; losing copies are
+    cancelled at handover and counted as waste. This is intentionally a strong,
+    resource-expensive hedging baseline rather than part of the proposal.
+    """
+
+    name = "pallas-hedge2"
+
+    def __init__(self, max_candidates=2, min_probability=0.15, **kwargs):
+        self.max_candidates = max_candidates
+        self.min_probability = min_probability
+        super().__init__(**kwargs)
+
+    def reset(self):
+        super().reset()
+        self.primary_targets: Dict[int, int] = {}
+
+    @staticmethod
+    def _cancel_copy(user, target, params, metrics):
+        prep = user.hedge_preps.pop(target, None)
+        if prep is not None:
+            metrics.record_cancel(prep, params.kv_mb_per_token)
+            user.epoch += 1
+
+    def _trigger_copy(self, user, target, t, deadline, metrics):
+        user.epoch += 1
+        user.hedge_preps[target] = Prep(
+            target=target, epoch=user.epoch, trigger_t=t, deadline_t=deadline,
+            prefix_total=user.tokens, prefix_remaining=user.tokens, stream_suffix=True)
+        metrics.record_hedge_copy()
+
+    def on_step(self, t, dt, users, servers, params, predictions, loads, metrics):
+        self._observe(servers, loads)
+        c = params.kv_mb_per_token
+        for u in users:
+            pred: Optional[Prediction] = predictions.get(u.id)
+            if pred is None:
+                self.primary_targets.pop(u.id, None)
+            else:
+                self.primary_targets[u.id] = pred.target
+            raw = list(pred.candidates) if pred is not None and pred.candidates else []
+            if pred is not None and not raw:
+                raw = [pred]
+            chosen = [cand for i, cand in enumerate(raw[:self.max_candidates])
+                      if i == 0 or getattr(cand, "probability", 1.0) >= self.min_probability]
+            desired = {cand.target: cand for cand in chosen if cand.target != u.anchor}
+
+            for target in list(u.hedge_preps):
+                if target not in desired:
+                    self._cancel_copy(u, target, params, metrics)
+                else:
+                    u.hedge_preps[target].deadline_t = desired[target].t_ho
+
+            for target, cand in desired.items():
+                if target in u.hedge_preps:
+                    continue
+                t_remain = cand.t_ho - t
+                if t_remain <= 0:
+                    continue
+                tw = self._select_window(t_remain, u.tokens, self.obs_rp[target],
+                                         self.obs_bw[target], params)
+                if self._fire_now(t_remain, tw, dt):
+                    srv = servers[target]
+                    if vram_in_use(users, target, c) + u.tokens * c <= srv.vram_budget_mb:
+                        self._trigger_copy(u, target, t, cand.t_ho, metrics)
+
+    def prepare_handover(self, user, dst, params, metrics, t):
+        chosen = user.hedge_preps.pop(dst.id, None)
+        for target in list(user.hedge_preps):
+            self._cancel_copy(user, target, params, metrics)
+        if chosen is not None:
+            user.prep = chosen
+            metrics.record_hedge_hit(self.primary_targets.get(user.id) != dst.id)
+        self.primary_targets.pop(user.id, None)
 
     def plan_handover(self, user, dst, params, v_share, bw_share, is_pingpong, predicted, t):
         if user.prep is not None and user.prep.target == dst.id:
