@@ -254,7 +254,7 @@ def run_scenario(cfg):
     return [(name, average(v)) for name, v in per_policy.items()]
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--users", type=int, default=64)
     ap.add_argument("--servers", type=int, default=6)
@@ -280,8 +280,11 @@ def main():
     ap.add_argument("--controlled", action="store_true", help="add Pallas/coordinated re-tuning variants")
     ap.add_argument("--ablation", action="store_true", help="add the coordinated mechanism ladder")
     ap.add_argument("--sweep-users", type=str, default="", help="comma list, e.g. 32,64,128")
-    cfg = ap.parse_args()
+    return ap
 
+
+def finalize_cfg(cfg):
+    """Fill derived fields (model preset, geometry, context band) on a parsed namespace."""
     preset = MODEL_PRESETS[cfg.model]
     cfg.kv_kib = cfg.kv_kib if cfg.kv_kib is not None else preset["kv_kib"]
     cfg.prefill_speed = cfg.prefill_speed if cfg.prefill_speed is not None else preset["prefill_speed"]
@@ -292,13 +295,20 @@ def main():
 
     cfg.width = cfg.height = 1000.0
     cfg.coverage = 320.0
-    cfg.min_context = 500.0
-    cfg.max_context = 4500.0
+    if getattr(cfg, "min_context", None) is None:
+        cfg.min_context = 500.0
+    if getattr(cfg, "max_context", None) is None:
+        cfg.max_context = 4500.0
     cfg.kv_mb_per_token = cfg.kv_kib / 1024.0
     cfg.backhaul_bw = cfg.backhaul_mbps / 8.0     # MB/s
     cfg.pingpong_window = 20.0
     cfg.pred_horizon = 20.0
     cfg.pred_step = cfg.dt
+    return cfg
+
+
+def main():
+    cfg = finalize_cfg(build_parser().parse_args())
 
     sweep = [int(x) for x in cfg.sweep_users.split(",") if x] or [cfg.users]
     for n in sweep:
