@@ -18,6 +18,7 @@ python3 run.py --model llama8b                  # 모델 프리셋(qwen32b/qwen1
 python3 run.py --users 12 --group 1             # 저경합: 제안 = Pallas 수렴 확인
 python3 reproduce_pallas.py                     # Pallas Table 1·Fig 8(a) 재현 + K>4 외삽
 python3 optgap.py                               # 소규모 인스턴스 최적해 대비 격차(brute force)
+python3 regime_map.py --seeds 3 --csv out.csv   # 체제 지도: 문맥×사용자, 잡음×사용자, 백홀×문맥 (약 30분)
 ```
 
 출력 열: `HO` 핸드오버 수, `SITavg/p99/max` 서비스 중단 시간(s), `prep%` 준비를 사용한
@@ -94,6 +95,8 @@ python3 optgap.py                               # 소규모 인스턴스 최적�
 - `minisim.py` — 단일 타겟 미니 시뮬레이터(재현·최적해 격차 공용)
 - `reproduce_pallas.py` — Pallas Table 1 / Fig. 8(a) 재현, K>4 외삽
 - `optgap.py` — K=3–5 인스턴스에서 트리거 스케줄 전수 탐색 대비 격차
+- `regime_map.py` — 문맥 길이·사용자 수·예측 잡음·백홀 대역폭 격자에서 ctHO/Pallas/제안의 승자 지도.
+  셀마다 SIT 평균·p99, 비율 격자(Pallas/ctHO, 제안/Pallas), Detour의 ITL 페널티를 출력(`--csv`)
 
 ## 루프 순서(주의)
 
