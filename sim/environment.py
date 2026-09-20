@@ -97,6 +97,7 @@ class User:
     generated_tokens_step: float = -1.0  # <0 means the legacy continuous decode model
     boundary_crossed_step: bool = False
     boundary_gap_s: float = 0.0
+    boundary_offset_s: float = 0.0  # time from the start of this step to turn end
 
 
 @dataclass

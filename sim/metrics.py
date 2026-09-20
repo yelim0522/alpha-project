@@ -51,6 +51,9 @@ class Metrics:
     boundary_moves: int = 0
     boundary_hidden: int = 0
     boundary_wait_s: float = 0.0
+    boundary_cancels: int = 0
+    boundary_pending: int = 0
+    boundary_unsettled: int = 0
 
     def record_handover(self, decision, is_pingpong: bool, early, user_id: int = -1):
         self.handover_count += 1
@@ -161,4 +164,7 @@ class Metrics:
                                    if self.boundary_moves else 0.0,
             "boundary_wait_s": self.boundary_wait_s / self.boundary_moves
                                if self.boundary_moves else 0.0,
+            "boundary_cancels": self.boundary_cancels,
+            "boundary_pending": self.boundary_pending,
+            "boundary_unsettled": self.boundary_unsettled,
         }

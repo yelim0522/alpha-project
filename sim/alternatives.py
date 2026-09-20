@@ -28,7 +28,8 @@ SUMMARY_KEYS = [
     "handovers", "sit_mean_s", "sit_p99_s", "sit_max_s", "itl_ms",
     "prep_rate_pct", "wasted_mb", "peak_streams", "load_cov", "jain",
     "transfer_mb", "hedge_copies", "hedge_hit_pct", "hedge_alt_hit_pct", "boundary_moves",
-    "boundary_hidden_pct", "boundary_wait_s",
+    "boundary_hidden_pct", "boundary_wait_s", "boundary_cancels", "boundary_pending",
+    "boundary_unsettled",
 ]
 
 
@@ -83,7 +84,8 @@ def emit(writer, map_name, row, rows):
 
 
 def run_turn_map(args, writer):
-    policies = [ReactiveHybrid, PallasApprox, Coordinated, TurnBoundary]
+    policies = [TurnBoundary] if args.turn_only else [ReactiveHybrid, PallasApprox,
+                                                       Coordinated, TurnBoundary]
     for users in args.users:
         cfg = make_cfg(args, users, turn_model=True)
         rows = evaluate(cfg, args.seeds, policies)
@@ -140,6 +142,8 @@ def main():
     ap.add_argument("--think-time", type=float, default=4.0)
     ap.add_argument("--think-times", default="0,1,2,4,8",
                     help="think-time sensitivity list for Map T2")
+    ap.add_argument("--turn-only", action="store_true",
+                    help="run only the changed turn-boundary policy in Map T")
     ap.add_argument("--candidates", type=int, default=2)
     ap.add_argument("--candidate-samples", type=int, default=8)
     ap.add_argument("--csv", default="")
@@ -148,7 +152,7 @@ def main():
     args.think_times = [float(x) for x in args.think_times.split(",") if x]
 
     fh = open(args.csv, "w", newline="") if args.csv else None
-    writer = csv.writer(fh) if fh else None
+    writer = csv.writer(fh, lineterminator="\n") if fh else None
     if writer:
         writer.writerow(["map", "condition", "policy"] + SUMMARY_KEYS)
         fh.flush()

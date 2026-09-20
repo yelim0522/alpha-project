@@ -20,7 +20,7 @@ MEC(멀티액세스 엣지 컴퓨팅)를 메인 주제로 하는 논문 작업 �
 처리 방식·prefill 순서·VRAM 승인·migrate/detour 선택을 공동 결정하는 조율**에 있습니다.
 경합이 없으면 Pallas와 같은 결정으로 수렴하는, Pallas의 다중 사용자 일반화입니다.
 
-- `paper/draft.md` — 논문 초안 v0.6(기존 검증 + 턴 경계·다중 후보 헤징·KV 압축 비교)
+- `paper/draft.md` — 논문 초안 v0.8(EdgeFlow 문헌 보강 + 턴 경계·헤징·압축 재검증)
 - `paper/references.md` — 참고문헌(주 베이스라인 Pallas, 보조 베이스라인 ctHO)
 - `sim/` — 표준 라이브러리 기반 이산시간 시뮬레이터. Pallas 공개 수치(Table 1, Fig. 8(a))에 ±10%로 보정된 자원 모델, 6개 정책 + ablation 사다리, Pallas 재현/외삽 스크립트, 소규모 최적해 격차 스크립트, 체제 지도(regime map) 스크립트
 

@@ -60,6 +60,9 @@ class Policy:
     def prepare_handover(self, user, dst, params, metrics, t):
         """Hook for policies holding state for more than one candidate target."""
 
+    def finalize(self, metrics):
+        """Optional end-of-trace accounting."""
+
     # ----- shared helpers -------------------------------------------------- #
     @staticmethod
     def _reactive(user, dst, params, v_share, bw_share, how="hybrid") -> Decision:
@@ -129,49 +132,164 @@ class Detour(Policy):
         return Decision(0.0, 0.0, 0.0, "detour", False)
 
 
-class TurnBoundary(Policy):
-    """Keep serving from the old anchor until generation reaches a turn boundary.
+@dataclass
+class BoundaryJob:
+    user_id: int
+    target: int
+    start_t: float
+    next_turn_t: float
+    prefix_total: float
+    prefix_remaining: float
+    transfer_remaining_mb: float
+    activation_remaining_s: float
+    sent_mb: float = 0.0
 
-    Migration starts in the following think interval. Only the part that exceeds
-    that interval is user-visible SIT; tokens generated before the boundary pay
-    the same forwarding ITL as Detour. This deliberately optimistic baseline
-    ignores codec/startup overhead beyond the calibrated reactive migration cost.
+
+class TurnBoundary(Policy):
+    """Detour until a turn ends, then migrate under shared GPU/link capacity.
+
+    A migration stays in flight across control cycles. The anchor changes only
+    after prefill, transfer and activation all finish. The conversation trace is
+    still policy-independent: a late move is charged as next-turn SIT, but the
+    trace itself is not shifted by that wait.
     """
 
     name = "turn-boundary"
     order_key = staticmethod(edf_key)
 
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.jobs: Dict[int, BoundaryJob] = {}
+        self.unsettled = 0
+
     def plan_handover(self, user, dst, params, v_share, bw_share, is_pingpong, predicted, t):
         return Decision(0.0, 0.0, 0.0, "detour", False)
 
     def on_step(self, t, dt, users, servers, params, predictions, loads, metrics):
-        by_target: Dict[int, List[User]] = {}
+        eps = 1e-9
+        user_by_id = {u.id: u for u in users}
+        # A new handover, return to the anchor, or respawn invalidates in-flight work.
+        for uid, job in list(self.jobs.items()):
+            u = user_by_id[uid]
+            if u.anchor == u.server or u.server != job.target:
+                metrics.wasted_mb += ((job.prefix_total - job.prefix_remaining)
+                                      * params.kv_mb_per_token + job.sent_mb)
+                del self.jobs[uid]
+                metrics.boundary_cancels += 1
+
+        due = []
         for u in users:
             at_boundary = u.turn_remaining_s <= 1e-9 or u.boundary_crossed_step
-            if u.hops > 0 and u.anchor != u.server and at_boundary:
-                by_target.setdefault(u.server, []).append(u)
-        c = params.kv_mb_per_token
-        for sid, due in by_target.items():
-            srv, load = servers[sid], loads[sid]
-            v_share = srv.prefill_share(len(due) + load.prefills)
-            bw_share = srv.backhaul_bw / max(1, len(due) + load.streams)
-            for u in due:
-                p = optimal_prefill_length(u.tokens, c, v_share, bw_share)
-                xfer_tokens = u.tokens - p
-                migration_s = params.activation_latency + handover_delay(
-                    p, xfer_tokens, c, v_share, bw_share)
-                gap_s = u.boundary_gap_s if u.boundary_crossed_step else u.think_remaining_s
-                wait_s = max(0.0, migration_s - gap_s)
-                metrics.record_settle(wait_s, u.id)
-                metrics.record_boundary_move(wait_s)
-                metrics.transferred_mb += c * xfer_tokens
-                load.demand_mb += c * xfer_tokens
-                load.sent_mb += c * xfer_tokens
-                if xfer_tokens > 0:
-                    load.streams += 1
-                if p > 0:
-                    load.prefills += 1
+            if u.id in self.jobs or u.hops <= 0 or u.anchor == u.server or not at_boundary:
+                continue
+            due.append(u)
+        counts = {sid: sum(j.target == sid for j in self.jobs.values())
+                  + sum(u.server == sid for u in due) for sid in servers}
+        for u in due:
+            start = t + (u.boundary_offset_s if u.boundary_crossed_step else 0.0)
+            gap = u.boundary_gap_s if u.boundary_crossed_step else u.think_remaining_s
+            sid = u.server
+            contenders = counts[sid]
+            srv = servers[sid]
+            v_share = srv.prefill_share(contenders)
+            bw_share = srv.backhaul_bw / contenders
+            p = optimal_prefill_length(u.tokens, params.kv_mb_per_token, v_share, bw_share)
+            self.jobs[u.id] = BoundaryJob(u.id, sid, start, start + gap, p, p,
+                                           params.kv_mb_per_token * (u.tokens - p),
+                                           params.activation_latency)
+
+        # Event-driven fluid service: both resources run in parallel, with equal
+        # link sharing and the same batched per-request GPU rate as the simulator.
+        # Recalculate shares whenever a job starts or a resource phase finishes.
+        end = t + dt
+        now = t
+        while now < end - eps:
+            active = [j for j in self.jobs.values() if j.start_t <= now + eps]
+            future = [j.start_t for j in self.jobs.values() if j.start_t > now + eps]
+            if not active:
+                if not future:
+                    break
+                now = min(end, min(future))
+                continue
+
+            # A previous event can leave tiny residuals; snap those to zero.
+            for j in active:
+                if j.prefix_remaining <= eps:
+                    j.prefix_remaining = 0.0
+                if j.transfer_remaining_mb <= eps:
+                    j.transfer_remaining_mb = 0.0
+                if j.activation_remaining_s <= eps:
+                    j.activation_remaining_s = 0.0
+            completed = [j for j in active if j.prefix_remaining == 0.0
+                         and j.transfer_remaining_mb == 0.0
+                         and j.activation_remaining_s == 0.0]
+            if completed:
+                for j in completed:
+                    u = user_by_id[j.user_id]
+                    wait = max(0.0, now - j.next_turn_t)
+                    metrics.record_settle(wait, u.id)
+                    metrics.record_boundary_move(wait)
+                    u.anchor, u.hops = u.server, 0
+                    del self.jobs[u.id]
+                continue
+
+            gpu = [j for j in active if j.prefix_remaining > 0.0]
+            link = [j for j in active if j.transfer_remaining_mb > 0.0]
+            activating = [j for j in active if j.prefix_remaining == 0.0
+                          and j.transfer_remaining_mb == 0.0
+                          and j.activation_remaining_s > 0.0]
+            sid_groups = set(j.target for j in active)
+            rates = {}
+            for sid in sid_groups:
+                ng = sum(j.target == sid for j in gpu)
+                nl = sum(j.target == sid for j in link)
+                rates[sid] = (servers[sid].prefill_share(ng),
+                              servers[sid].backhaul_bw / nl if nl else 0.0)
+                loads[sid].prefills = max(loads[sid].prefills, ng)
+                loads[sid].streams = max(loads[sid].streams, nl)
+
+            span = end - now
+            if future:
+                span = min(span, min(future) - now)
+            for j in gpu:
+                span = min(span, j.prefix_remaining / rates[j.target][0])
+            for j in link:
+                span = min(span, j.transfer_remaining_mb / rates[j.target][1])
+            for j in activating:
+                span = min(span, j.activation_remaining_s)
+            if span <= eps:
+                # Avoid stalling on floating-point event boundaries.
+                span = min(end - now, 1e-8)
+            for j in gpu:
+                j.prefix_remaining = max(0.0, j.prefix_remaining - rates[j.target][0] * span)
+            for j in link:
+                sent = min(j.transfer_remaining_mb, rates[j.target][1] * span)
+                j.transfer_remaining_mb -= sent
+                j.sent_mb += sent
+                loads[j.target].demand_mb += sent
+                loads[j.target].sent_mb += sent
+                metrics.transferred_mb += sent
+            for j in activating:
+                j.activation_remaining_s = max(0.0, j.activation_remaining_s - span)
+            now += span
+
+        # Completion exactly at the step boundary should not be delayed by dt.
+        for j in list(self.jobs.values()):
+            if (j.start_t <= end + eps and j.prefix_remaining <= eps
+                    and j.transfer_remaining_mb <= eps and j.activation_remaining_s <= eps):
+                u = user_by_id[j.user_id]
+                wait = max(0.0, end - j.next_turn_t)
+                metrics.record_settle(wait, u.id)
+                metrics.record_boundary_move(wait)
                 u.anchor, u.hops = u.server, 0
+                del self.jobs[u.id]
+        self.unsettled = sum(u.anchor != u.server for u in users)
+
+    def finalize(self, metrics):
+        metrics.boundary_pending = len(self.jobs)
+        metrics.boundary_unsettled = self.unsettled
 
 
 # --------------------------------------------------------------------------- #

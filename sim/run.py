@@ -85,7 +85,8 @@ def precompute_trace(cfg, servers):
             u.server = nearest_server(u, servers).id
             snapshot.append((u.x, u.y, u.vx, u.vy, u.tokens, u.respawned,
                              u.turn_remaining_s, u.think_remaining_s, u.next_think_s,
-                             generated, u.boundary_crossed_step, u.boundary_gap_s))
+                             generated, u.boundary_crossed_step, u.boundary_gap_s,
+                             u.boundary_offset_s))
             u.respawned = False
         preds = predict_all(users, servers, t, cfg.pred_horizon, cfg.pred_step, pred_rng,
                             cfg.pred_speed_noise, cfg.pred_heading_noise,
@@ -113,6 +114,7 @@ def _advance_conversation(user, cfg, dt):
     """Advance one user's generation/think cycle without policy-dependent timing."""
     user.boundary_crossed_step = False
     user.boundary_gap_s = 0.0
+    user.boundary_offset_s = 0.0
     remaining = dt
     while remaining > 1e-9:
         if user.turn_remaining_s > 1e-9:
@@ -125,6 +127,7 @@ def _advance_conversation(user, cfg, dt):
                 user.think_remaining_s = user.next_think_s
                 user.boundary_crossed_step = True
                 user.boundary_gap_s = user.next_think_s
+                user.boundary_offset_s = dt - remaining
         else:
             step = min(remaining, user.think_remaining_s)
             user.think_remaining_s -= step
@@ -148,12 +151,13 @@ def run_policy(policy, cfg, server_list, trace) -> dict:
         t = t_idx * cfg.dt
         pending: Dict[int, list] = {}
         for u, (x, y, vx, vy, tokens, respawned, turn_left, think_left, next_think,
-                generated, boundary_crossed, boundary_gap) in zip(users, snap):
+                generated, boundary_crossed, boundary_gap, boundary_offset) in zip(users, snap):
             u.x, u.y, u.vx, u.vy, u.tokens = x, y, vx, vy, tokens
             u.turn_remaining_s, u.think_remaining_s = turn_left, think_left
             u.next_think_s = next_think
             u.generated_tokens_step = generated
             u.boundary_crossed_step, u.boundary_gap_s = boundary_crossed, boundary_gap
+            u.boundary_offset_s = boundary_offset
             here = nearest_server(u, servers.values())
             if u.server == -1 or respawned:
                 # Fresh session: state is born at the serving server, nothing to migrate.
@@ -248,6 +252,7 @@ def run_policy(policy, cfg, server_list, trace) -> dict:
         metrics.record_itl(users, params)
         metrics.record_step_load(loads, cfg.dt)
         prev_loads, prev_preds = loads, preds
+    policy.finalize(metrics)
     return metrics.summary()
 
 

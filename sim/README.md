@@ -20,6 +20,7 @@ python3 reproduce_pallas.py                     # Pallas Table 1·Fig 8(a) 재�
 python3 optgap.py                               # 소규모 인스턴스 최적해 대비 격차(brute force)
 python3 regime_map.py --seeds 3 --csv out.csv   # 체제 지도: 문맥×사용자, 잡음×사용자, 백홀×문맥 (약 30분)
 python3 alternatives.py --seeds 3 --csv alternatives.csv  # 턴 경계·다중 후보 헤징·이상적 KV 압축
+python3 alternatives.py --maps T --turn-only --seeds 3 --csv alternatives_turn.csv  # 턴 경계만 재검증
 ```
 
 출력 열: `HO` 핸드오버 수, `SITavg/p99/max` 서비스 중단 시간(s), `prep%` 준비를 사용한

@@ -43,4 +43,6 @@
 
 [19] X. Zhao, Y. Shi, S. Chen, J. Liu, B. Ji, and S. Mumtaz, "MAPSM: Mobility-Aware Proactive Service Migration Framework for Mobile Edge Computing in Consumer Internet of Vehicles," *IEEE Trans. Consum. Electron.*, 2025. (키: mapsm)
 
+[20] M. Zhang, J. Cao, T. Wu, X. Chen, and N. Wang, "Efficient KV Cache Migration for Geo-Distributed LLM Inference in Collaborative Edge Computing," in *Proc. IEEE ICDCS*, 2026, pp. 272–282, doi: 10.1109/2575-8411.2026.00033. (키: edgeflow)
+
 > 참고: [1], [2], [8], [14], [16], [19]의 서지는 Pallas [6]의 참고문헌 목록에서 가져왔으며 제출 전 원문 대조가 필요하다. 본문에서 인용되지 않는 항목(SlimCaching, 오프로딩 서베이, DNN 캐싱, Hybrid 온·오프라인 학습, 장문맥 모델 캐싱, 출력 길이 예측 스케줄링)은 이번 판에서 제거하였다.

@@ -60,6 +60,65 @@ class AlternativeBaselineTests(unittest.TestCase):
         self.assertEqual(metrics.boundary_hidden, 1)
         self.assertAlmostEqual(metrics.sits[0], 0.0)
 
+    def test_turn_boundary_job_occupies_resources_across_steps(self):
+        servers = {1: Server(1, 0.0, 0.0, 1.0, 10.0, 1.0, 1000.0, 1.0)}
+        users = [User(i, 0.0, 0.0, tokens=40.0, server=1, anchor=0, hops=1,
+                      think_remaining_s=0.5) for i in range(2)]
+        policy, metrics = TurnBoundary(), Metrics()
+        first = {1: LinkLoad()}
+        policy.on_step(0.0, 0.5, users, servers, CostParams(), {}, first, metrics)
+        self.assertEqual([u.anchor for u in users], [0, 0])
+        self.assertEqual(first[1].streams, 2)
+        self.assertEqual(first[1].prefills, 2)
+        self.assertGreater(first[1].sent_mb, 0.0)
+        self.assertLessEqual(first[1].sent_mb, 0.5 + 1e-9)
+        self.assertEqual(metrics.boundary_moves, 0)
+        policy.finalize(metrics)
+        self.assertEqual(metrics.boundary_pending, 2)
+
+        for i in range(1, 30):
+            policy.on_step(i * 0.5, 0.5, users, servers, CostParams(), {},
+                           {1: LinkLoad()}, metrics)
+            if metrics.boundary_moves == 2:
+                break
+        self.assertEqual(metrics.boundary_moves, 2)
+        self.assertEqual([u.anchor for u in users], [1, 1])
+        self.assertTrue(all(s > 0.0 for s in metrics.sits))
+        policy.finalize(metrics)
+        self.assertEqual(metrics.boundary_pending, 0)
+
+    def test_turn_boundary_waits_for_actual_boundary_offset(self):
+        servers = {1: Server(1, 0.0, 0.0, 1.0, 1000.0, 1000.0, 1000.0)}
+        user = User(0, 0.0, 0.0, tokens=100.0, server=1, anchor=0, hops=1,
+                    boundary_crossed_step=True, boundary_offset_s=0.48,
+                    boundary_gap_s=1.0, think_remaining_s=0.98)
+        policy, metrics = TurnBoundary(), Metrics()
+        policy.on_step(0.0, 0.5, [user], servers, CostParams(), {},
+                       {1: LinkLoad()}, metrics)
+        self.assertEqual(user.anchor, 0)
+        self.assertEqual(metrics.boundary_moves, 0)
+        policy.on_step(0.5, 0.5, [user], servers, CostParams(), {},
+                       {1: LinkLoad()}, metrics)
+        self.assertEqual(user.anchor, 1)
+        self.assertAlmostEqual(metrics.sits[0], 0.0)
+
+    def test_turn_boundary_cancels_stale_target(self):
+        servers = {i: Server(i, float(i), 0.0, 1.0, 10.0, 1.0, 1000.0)
+                   for i in (1, 2)}
+        user = User(0, 0.0, 0.0, tokens=100.0, server=1, anchor=0, hops=1,
+                    think_remaining_s=1.0)
+        policy, metrics = TurnBoundary(), Metrics()
+        policy.on_step(0.0, 0.5, [user], servers, CostParams(), {},
+                       {i: LinkLoad() for i in servers}, metrics)
+        self.assertIn(user.id, policy.jobs)
+        user.server = 2
+        policy.on_step(0.5, 0.5, [user], servers, CostParams(), {},
+                       {i: LinkLoad() for i in servers}, metrics)
+        self.assertEqual(metrics.boundary_cancels, 1)
+        self.assertGreater(metrics.wasted_mb, 0.0)
+        self.assertEqual(user.anchor, 0)
+        self.assertEqual(policy.jobs[user.id].target, 2)
+
     def test_candidate_probabilities_keep_missing_mass(self):
         servers = [
             Server(0, 0.0, 0.0, 100.0, 100.0, 100.0, 1000.0),
