@@ -21,7 +21,8 @@ EdgeFlow는 다중 KV 이전을, ImpactHO는 이동 사용자들의 부분 KV와
 목표 서버의 GPU·링크 경합을 고려해 여러 사용자의 준비 시작 시점을 공동 계획**하는
 것입니다. 경합이 없으면 Pallas와 같은 결정으로 수렴합니다.
 
-- `paper/draft.md` — 논문 초안 v0.10(문헌 점검 + 정책별 대화 시계·실측 응답 길이 검증)
+- [paper/draft.md](paper/draft.md) — 팀 검토용 초안 v0.11(초록·결과·결론 정리, 턴 경계 검증 그림 포함)
+- [paper/figures/README.md](paper/figures/README.md) — 논문용 그림 2개(PNG/PDF/SVG), 통계 정의와 재현 방법
 - `paper/impactho_comparison.md` — ImpactHO와 본 연구의 문제·결정 변수·지표 대조
 - `paper/turn_boundary_validation.md` — 턴 경계 한계 검증 결과, 응답 완료량·실제 대기·자원 점유 해석
 - `paper/references.md` — 참고문헌(주 베이스라인 Pallas, 보조 베이스라인 ctHO)
@@ -40,3 +41,7 @@ python3 regime_map.py --seeds 3                # 체제 지도: 선제형이 반
 python3 alternatives.py --seeds 3 --csv alternatives.csv  # 턴 경계·헤징·KV 압축 비교
 python3 turn_validation.py --seeds 3 --users 192 --seconds 600  # 정책별 대화 시계·길이 분포 검증
 ```
+
+기존 결과로 그림만 다시 만들 때는 실험을 재실행할 필요가 없습니다. 별도 가상환경에
+`sim/requirements-figures.txt`를 설치하고 저장소 루트에서
+`python sim/plot_turn_validation.py`를 실행합니다([상세 절차](paper/figures/README.md)).

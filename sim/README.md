@@ -4,6 +4,10 @@
 **공유 자원(타겟 GPU prefill·gNB 간 백홀 링크·VRAM)** 위에서 비교 평가하는 이산시간
 시뮬레이터입니다. 표준 라이브러리만 사용하므로 `python3 run.py`로 바로 실행됩니다.
 
+논문용 그림은 선택 의존성 `requirements-figures.txt`를 설치한 별도 환경에서
+`python3 plot_turn_validation.py`로 생성합니다. 저장된 84회 결과와 원본 구현 해시를
+검증한 뒤 PNG/PDF/SVG를 만듭니다. [그림·재현 안내](../paper/figures/README.md)를 참고하세요.
+
 ## 실행
 
 ```bash
@@ -36,8 +40,8 @@ python3 turn_validation.py --seeds 3 --users 192 --seconds 600  # 정책별 대�
 파라미터는 Pallas 논문의 공개 수치에 맞춥니다. Table 1(Qwen3-32B, 300 Mbps, 1K/2K/4K
 토큰의 Full-Copy/Recomputation/ctHO)로 `v1`·`T0(반응형)`을, Fig. 8(a)(Qwen3-14B, 2K
 토큰, 1 Gbps, K=1–4 동시 UE)로 `T0(선제형)`·활성화 직렬화 비용을 맞추면 모든 셀이
-±10%(K=3 평균만 +15%) 안에 들어옵니다. 같은 스크립트가 K=6–32로 외삽하여, 프로토타입
-(GPU 2대)이 측정할 수 없는 구간에서 비조율 Pallas와 조율 정책이 어떻게 갈라지는지
+대부분 ±10%(K=3 평균 +15%, 최대 +12% 예외) 안에 들어옵니다. 같은 스크립트가 K=6–32로 외삽하여, 원 논문의
+측정 범위 밖에서 비조율 Pallas와 조율 정책이 어떻게 갈라지는지
 보여줍니다.
 
 ### 자원 모델(`environment.py`)
