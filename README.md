@@ -16,11 +16,13 @@ MEC(멀티액세스 엣지 컴퓨팅)를 메인 주제로 하는 논문 작업 �
   사라지지 않고 시간축에서 앞으로 옮겨질 뿐입니다(herding). Pallas는 다중 사용자 자원
   배분을 명시적으로 범위 밖으로 두었습니다.
 
-본 연구의 novelty는 "선제성"이 아니라 **타겟 단위로 여러 사용자의 프리페치 시점·suffix
-처리 방식·prefill 순서·VRAM 승인·migrate/detour 선택을 공동 결정하는 조율**에 있습니다.
-경합이 없으면 Pallas와 같은 결정으로 수렴하는, Pallas의 다중 사용자 일반화입니다.
+EdgeFlow는 다중 KV 이전을, ImpactHO는 이동 사용자들의 부분 KV와 백홀 배분을 이미
+다룹니다. 본 연구의 차별성은 **예측된 전환 시각 아래 완전한 상태를 준비할 때, 같은
+목표 서버의 GPU·링크 경합을 고려해 여러 사용자의 준비 시작 시점을 공동 계획**하는
+것입니다. 경합이 없으면 Pallas와 같은 결정으로 수렴합니다.
 
-- `paper/draft.md` — 논문 초안 v0.8(EdgeFlow 문헌 보강 + 턴 경계·헤징·압축 재검증)
+- `paper/draft.md` — 논문 초안 v0.9(EdgeFlow·ImpactHO 문헌 점검 + 대안 실험)
+- `paper/impactho_comparison.md` — ImpactHO와 본 연구의 문제·결정 변수·지표 대조
 - `paper/references.md` — 참고문헌(주 베이스라인 Pallas, 보조 베이스라인 ctHO)
 - `sim/` — 표준 라이브러리 기반 이산시간 시뮬레이터. Pallas 공개 수치(Table 1, Fig. 8(a))에 ±10%로 보정된 자원 모델, 6개 정책 + ablation 사다리, Pallas 재현/외삽 스크립트, 소규모 최적해 격차 스크립트, 체제 지도(regime map) 스크립트
 
