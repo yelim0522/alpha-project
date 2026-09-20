@@ -98,6 +98,8 @@ class User:
     boundary_crossed_step: bool = False
     boundary_gap_s: float = 0.0
     boundary_offset_s: float = 0.0  # time from the start of this step to turn end
+    recovery_until_s: float = 0.0  # optional closed-loop conversation gate
+    boundary_ready_t: float = 0.0  # exact completion time of a boundary migration
 
 
 @dataclass

@@ -232,6 +232,7 @@ class TurnBoundary(Policy):
                     metrics.record_settle(wait, u.id)
                     metrics.record_boundary_move(wait)
                     u.anchor, u.hops = u.server, 0
+                    u.boundary_ready_t = now
                     del self.jobs[u.id]
                 continue
 
@@ -284,6 +285,7 @@ class TurnBoundary(Policy):
                 metrics.record_settle(wait, u.id)
                 metrics.record_boundary_move(wait)
                 u.anchor, u.hops = u.server, 0
+                u.boundary_ready_t = end
                 del self.jobs[u.id]
         self.unsettled = sum(u.anchor != u.server for u in users)
 

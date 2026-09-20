@@ -47,4 +47,6 @@
 
 [21] M. Zhang, J. Cao, T. Wu, X. Chen, and N. Wang, "Efficient KV Cache Migration for Geo-Distributed LLM Inference in Collaborative Edge Computing," in *Proc. IEEE ICDCS*, 2026, pp. 272–282, doi: 10.1109/2575-8411.2026.00033. (키: edgeflow)
 
+[22] J. Stojkovic, C. Zhang, Í. Goiri, J. Torrellas, and E. Choukse, "DynamoLLM: Designing LLM Inference Clusters for Performance and Energy Efficiency," in *Proc. IEEE HPCA*, 2025. [논문](https://arxiv.org/abs/2408.00741), [공식 Azure LLM inference trace 2024](https://github.com/Azure/AzurePublicDataset/blob/master/AzureLLMInferenceDataset2024.md), CC BY 4.0. 본 연구는 Conversation 자료의 응답 길이 표본만 사용하며 사용자 생각 시간 자료로 해석하지 않는다. (키: azuretrace)
+
 > 참고: [1], [2], [8], [15], [17], [20]의 서지는 Pallas [6]의 참고문헌 목록에서 가져왔으며 제출 전 원문 대조가 필요하다. 본문에서 인용되지 않는 항목(SlimCaching, 오프로딩 서베이, DNN 캐싱, Hybrid 온·오프라인 학습, 장문맥 모델 캐싱, 출력 길이 예측 스케줄링)은 이번 판에서 제거하였다.

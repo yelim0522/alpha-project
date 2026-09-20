@@ -21,6 +21,7 @@ python3 optgap.py                               # 소규모 인스턴스 최적�
 python3 regime_map.py --seeds 3 --csv out.csv   # 체제 지도: 문맥×사용자, 잡음×사용자, 백홀×문맥 (약 30분)
 python3 alternatives.py --seeds 3 --csv alternatives.csv  # 턴 경계·다중 후보 헤징·이상적 KV 압축
 python3 alternatives.py --maps T --turn-only --seeds 3 --csv alternatives_turn.csv  # 턴 경계만 재검증
+python3 turn_validation.py --seeds 3 --users 192 --seconds 600  # 정책별 대화 시계·실측 응답 길이
 ```
 
 출력 열: `HO` 핸드오버 수, `SITavg/p99/max` 서비스 중단 시간(s), `prep%` 준비를 사용한
@@ -112,10 +113,23 @@ python3 alternatives.py --maps T --turn-only --seeds 3 --csv alternatives_turn.c
 "이상적 트리거 시점이 다음 제어 주기 전에 오면 지금 트리거"로 이산화했습니다(격자와 예측
 잔여 시간이 어긋나 트리거가 영구히 누락되는 문제를 막음).
 
+## 정책별 대화 시계 검증
+
+대화 시계 검증은 `--conversation-clock closed-loop`로 활성화한다. 기본 `trace` 모드는 기존 체제 지도와 비교를 위해 유지한다. 새 모드는 모든 정책에서 실제 복구 대기와 전달 지연만큼 다음 턴을 늦추며, 완료 응답 수와 검열된 대기도 보고한다. `response_wait_*`는 완료 응답별 실제 중단 시간이고 기존 이전 사건별 SIT와 분모가 다르다. `response_excess_*`는 중단과 전달 지연을 포함한 응답 완료까지의 추가 시간이다.
+
+```sh
+python3 run.py --alternatives --conversation-clock closed-loop --turn-distribution lognormal --think-distribution mixture
+python3 run.py --alternatives --conversation-clock closed-loop --turn-workload data/azure_output_histogram.json
+python3 turn_validation.py --seeds 1 --users 16 --seconds 60 --scenarios fixed,azure-mixture --output /tmp/turn_smoke
+python3 -m unittest discover
+```
+
+`turn_validation.py`는 시드별 CSV·평균/표준편차 CSV·재현용 설정/해시 JSON을 남긴다. 저장된 Azure 히스토그램을 쓰므로 실험은 오프라인 실행 가능하다. 자료 추출은 `prepare_turn_workload.py`, 출처·표본 한계는 `data/README.md`, 결과는 `../paper/turn_boundary_validation.md`를 참조한다. 생각 시간은 합성 가정이고 실제 대화 순서를 재생하지 않는다. `--decode-capacity`는 서버당 생성 처리량 민감도이며 GPU 실측값이 아니다. VRAM은 점유를 기록하되 전체 상주 메모리의 승인·퇴거는 모델링하지 않는다.
+
 ## 확장 지점(본실험 TODO)
 
 1. **실제 이동성 트레이스**: nuScenes(Pallas와 동일), T-Drive/Rome/Porto taxi.
-2. **대화 길이 분포**: ShareGPT/LMSYS-Chat-1M 실측 분포.
+2. **대화 길이·생각 시간**: Azure 응답 길이 표본과 합성 생각 시간 검증은 추가됨. 실제 세션 순서·입력 토큰·턴 간 간격의 짝 자료가 남음.
 3. **자원 모델 정밀화**: chunked prefill과 상주 디코딩 세션(HI 경합), 링크 프로토콜 오버헤드.
 4. **VRAM을 계획에 반영**: 현재는 트리거 시점 승인만 하므로 예산이 작으면 준비가 보류됨.
 5. **예측 신뢰도 활용**: 다중 후보 확률 가중 준비(헤징).

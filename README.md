@@ -21,8 +21,9 @@ EdgeFlow는 다중 KV 이전을, ImpactHO는 이동 사용자들의 부분 KV와
 목표 서버의 GPU·링크 경합을 고려해 여러 사용자의 준비 시작 시점을 공동 계획**하는
 것입니다. 경합이 없으면 Pallas와 같은 결정으로 수렴합니다.
 
-- `paper/draft.md` — 논문 초안 v0.9(EdgeFlow·ImpactHO 문헌 점검 + 대안 실험)
+- `paper/draft.md` — 논문 초안 v0.10(문헌 점검 + 정책별 대화 시계·실측 응답 길이 검증)
 - `paper/impactho_comparison.md` — ImpactHO와 본 연구의 문제·결정 변수·지표 대조
+- `paper/turn_boundary_validation.md` — 턴 경계 한계 검증 결과, 응답 완료량·실제 대기·자원 점유 해석
 - `paper/references.md` — 참고문헌(주 베이스라인 Pallas, 보조 베이스라인 ctHO)
 - `sim/` — 표준 라이브러리 기반 이산시간 시뮬레이터. Pallas 공개 수치(Table 1, Fig. 8(a))에 ±10%로 보정된 자원 모델, 6개 정책 + ablation 사다리, Pallas 재현/외삽 스크립트, 소규모 최적해 격차 스크립트, 체제 지도(regime map) 스크립트
 
@@ -37,4 +38,5 @@ python3 reproduce_pallas.py                    # Pallas Table 1·Fig 8(a) 재현
 python3 optgap.py                              # K=3–5 전수 탐색 대비 격차
 python3 regime_map.py --seeds 3                # 체제 지도: 선제형이 반응형에 지는 구간 확인
 python3 alternatives.py --seeds 3 --csv alternatives.csv  # 턴 경계·헤징·KV 압축 비교
+python3 turn_validation.py --seeds 3 --users 192 --seconds 600  # 정책별 대화 시계·길이 분포 검증
 ```

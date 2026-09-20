@@ -14,6 +14,7 @@ published for Pallas; see environment.MODEL_PRESETS and reproduce_pallas.py.
 
 import argparse
 import random
+import math
 from typing import Dict, List
 
 from environment import (
@@ -143,6 +144,10 @@ def run_policy(policy, cfg, server_list, trace) -> dict:
     params = make_params(cfg)
     users = [User(id=i, x=0.0, y=0.0) for i in range(cfg.users)]
     metrics = Metrics()
+    clock = None
+    if getattr(cfg, "conversation_clock", "trace") == "closed-loop":
+        from conversation import ConversationClock
+        clock = ConversationClock(cfg, metrics)
     prev_loads = {sid: LinkLoad() for sid in servers}
     prev_preds: dict = {}
     c = params.kv_mb_per_token
@@ -152,12 +157,19 @@ def run_policy(policy, cfg, server_list, trace) -> dict:
         pending: Dict[int, list] = {}
         for u, (x, y, vx, vy, tokens, respawned, turn_left, think_left, next_think,
                 generated, boundary_crossed, boundary_gap, boundary_offset) in zip(users, snap):
-            u.x, u.y, u.vx, u.vy, u.tokens = x, y, vx, vy, tokens
-            u.turn_remaining_s, u.think_remaining_s = turn_left, think_left
-            u.next_think_s = next_think
-            u.generated_tokens_step = generated
-            u.boundary_crossed_step, u.boundary_gap_s = boundary_crossed, boundary_gap
-            u.boundary_offset_s = boundary_offset
+            u.x, u.y, u.vx, u.vy = x, y, vx, vy
+            if clock is None:
+                u.tokens = tokens
+                u.turn_remaining_s, u.think_remaining_s = turn_left, think_left
+                u.next_think_s = next_think
+                u.generated_tokens_step = generated
+                u.boundary_crossed_step, u.boundary_gap_s = boundary_crossed, boundary_gap
+                u.boundary_offset_s = boundary_offset
+            elif u.server == -1 or respawned:
+                u.tokens = tokens - max(0.0, generated)
+                clock.reset_user(u)
+            else:
+                clock.sync(u)
             here = nearest_server(u, servers.values())
             if u.server == -1 or respawned:
                 # Fresh session: state is born at the serving server, nothing to migrate.
@@ -214,6 +226,8 @@ def run_policy(policy, cfg, server_list, trace) -> dict:
                     ld.prefills += 1
                 if dec.mode == "migrate":
                     u.anchor, u.hops = dst.id, 0
+                    if clock is not None:
+                        u.recovery_until_s = max(t, u.recovery_until_s) + dec.sit
                 elif dec.mode == "detour":
                     u.hops += 1
                 else:
@@ -229,7 +243,11 @@ def run_policy(policy, cfg, server_list, trace) -> dict:
                     u.history.pop(0)
 
         # 2) Policy control cycle with the fresh predictions, then resource progression.
+        if clock is not None:
+            clock.account_residence(users, cfg.dt, params)
         policy.on_step(t, cfg.dt, users, servers, params, preds, loads, metrics)
+        if clock is not None:
+            clock.advance(users, policy, t, cfg.dt, params)
         prep_loads = advance_preparations(users, servers, params, t, cfg.dt, policy.order_key)
         for sid, ld in prep_loads.items():
             tot = loads[sid]
@@ -246,14 +264,20 @@ def run_policy(policy, cfg, server_list, trace) -> dict:
                 v_share = servers[u.server].prefill_share(loads[u.server].prefills + 1)
                 sit = params.activation_latency_proactive + p.unsent_suffix_tokens(c) / v_share
                 metrics.record_settle(sit, u.id)
+                if clock is not None:
+                    u.recovery_until_s = max(t + cfg.dt, u.recovery_until_s) + sit
                 loads[u.server].prefills += 1
                 u.anchor, u.hops, u.prep = u.server, 0, None
 
-        metrics.record_itl(users, params)
+        if clock is None:
+            metrics.record_itl(users, params)
         metrics.record_step_load(loads, cfg.dt)
         prev_loads, prev_preds = loads, preds
     policy.finalize(metrics)
-    return metrics.summary()
+    summary = metrics.summary()
+    if clock is not None:
+        summary.update(clock.summary())
+    return summary
 
 
 # (title, width, summary key, decimals; None decimals = integer)
@@ -355,6 +379,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="alternate generation and think intervals for turn-boundary experiments")
     ap.add_argument("--turn-output-tokens", type=float, default=128.0)
     ap.add_argument("--think-time", type=float, default=4.0)
+    ap.add_argument("--conversation-clock", choices=["trace", "closed-loop"], default="trace",
+                    help="closed-loop gates generation by recovery and forwarding delay")
+    ap.add_argument("--turn-distribution", choices=["fixed", "lognormal"], default="fixed")
+    ap.add_argument("--think-distribution", choices=["fixed", "lognormal", "mixture"], default="fixed")
+    ap.add_argument("--turn-workload", default="",
+                    help="empirical output histogram JSON or paired output_tokens,think_s CSV")
+    ap.add_argument("--decode-capacity", type=float, default=0.0,
+                    help="optional aggregate decode tokens/s per anchor; 0 is unbounded")
     ap.add_argument("--kv-compression-ratio", type=float, default=1.0,
                     help="ideal compressed/raw KV byte ratio (codec overhead omitted)")
     ap.add_argument("--alternatives", action="store_true",
@@ -381,6 +413,13 @@ def finalize_cfg(cfg):
         cfg.min_context = 500.0
     if getattr(cfg, "max_context", None) is None:
         cfg.max_context = 4500.0
+    if cfg.conversation_clock == "closed-loop":
+        cfg.turn_model = True
+    if cfg.conversation_clock == "trace" and (cfg.turn_workload or cfg.turn_distribution != "fixed"
+                                              or cfg.think_distribution != "fixed" or cfg.decode_capacity):
+        raise ValueError("workload distributions and decode capacity require --conversation-clock closed-loop")
+    if not math.isfinite(cfg.decode_capacity) or cfg.decode_capacity < 0:
+        raise ValueError("decode capacity must be finite and non-negative")
     if not 0 < cfg.kv_compression_ratio <= 1:
         raise ValueError("--kv-compression-ratio must be in (0, 1]")
     if cfg.pred_candidates < 1 or cfg.pred_samples < 1:
