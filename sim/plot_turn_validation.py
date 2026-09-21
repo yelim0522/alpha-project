@@ -106,6 +106,12 @@ def save_figure(fig, out, stem):
                     else {"Date": None} if extension == "svg" else {})
         fig.savefig(out / (stem + "." + extension), dpi=220,
                     facecolor="white", metadata=metadata)
+        if extension == "svg":
+            # Matplotlib adds trailing spaces to path coordinates. Normalize
+            # only line ends; SVG geometry and the rendered figure are unchanged.
+            path = out / (stem + ".svg")
+            path.write_text("\n".join(line.rstrip() for line in
+                                      path.read_text().splitlines()) + "\n")
 
 
 def render(indexed, seeds, configs, out):
@@ -232,7 +238,8 @@ def main():
             for seed, value in zip(seeds, series):
                 records.append(dict(scenario=scenario, metric=metric, seed=seed, value=value))
     with (out / "turn_boundary_paired.csv").open("w", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=("scenario", "metric", "seed", "value"))
+        writer = csv.DictWriter(stream, fieldnames=("scenario", "metric", "seed", "value"),
+                                lineterminator="\n")
         writer.writeheader()
         writer.writerows(records)
     audit = {
