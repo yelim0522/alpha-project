@@ -3,7 +3,7 @@
 > 실제 제출 전 각 항목의 서지정보(권/호/페이지/DOI)를 원문에서 재확인할 것.
 > arXiv 프리프린트는 저널/학회 게재 확정 시 정식 서지로 교체 권장.
 > 각 항목 끝의 (키: ...)는 본문 `draft.md`의 인용 키와의 매핑이다.
-> v0.3에서 추가: hopred, warp, pallas, sllm, llumnix, cachegen, mapsm. 주 베이스라인은 Pallas [6], 보조 베이스라인은 ctHO [12].
+> v0.3에서 추가: hopred, warp, pallas, sllm, llumnix, cachegen, mapsm. 주 베이스라인은 Pallas [6], 보조 베이스라인은 ctHO [13]. ImpactHO [11]은 부분 KV 정확도 중심의 인접 연구다.
 
 [1] H. Abdah, J. P. Barraca, and R. L. Aguiar, "Handover Prediction Integrated with Service Migration in 5G Systems," in *Proc. IEEE ICC*, 2020, pp. 1–7. (키: hopred)
 
@@ -25,22 +25,28 @@
 
 [10] J. Jiang, P. Yang, R. Zhang, and F. Liu, "Towards Efficient Large Language Model Serving: A Survey on System-Aware KV Cache Optimization," *arXiv preprint arXiv:2607.08057*, 2026. (키: kvsurvey)
 
-[11] W. Kwon et al., "Efficient Memory Management for Large Language Model Serving with PagedAttention," in *Proc. ACM SOSP*, 2023. (키: vllm)
+[11] M. Kim, S. Song, N. Lee, B. C. Jung, and Y. Kim, "ImpactHO: Importance-Aware KV Cache Transfer for Multi-User Edge LLM Handover," *arXiv preprint arXiv:2608.10545*, 2026. (키: impactho)
 
-[12] S. Lee, J. Park, C. Zheng, and H. Park, "Low-Latency Edge LLM Handover via Joint KV Cache Transfer and Token Prefill," *arXiv preprint arXiv:2603.28018*, 2026. — 보조 베이스라인(ctHO) (키: target)
+[12] W. Kwon et al., "Efficient Memory Management for Large Language Model Serving with PagedAttention," in *Proc. ACM SOSP*, 2023. (키: vllm)
 
-[13] S. Liu and H. Sun, "Mobility-Aware Graph Reinforcement Learning for Service Migration in Mobile Edge Computing," in *Proc. CISP-BMEI*, 2024, doi: 10.1109/CISP-BMEI64163.2024.10906084. (키: magrl)
+[13] S. Lee, J. Park, C. Zheng, and H. Park, "Low-Latency Edge LLM Handover via Joint KV Cache Transfer and Token Prefill," *arXiv preprint arXiv:2603.28018*, 2026. — 보조 베이스라인(ctHO) (키: target)
 
-[14] Y. Liu et al., "CacheGen: KV Cache Compression and Streaming for Fast Large Language Model Serving," in *Proc. ACM SIGCOMM*, 2024, pp. 38–56. (키: cachegen)
+[14] S. Liu and H. Sun, "Mobility-Aware Graph Reinforcement Learning for Service Migration in Mobile Edge Computing," in *Proc. CISP-BMEI*, 2024, doi: 10.1109/CISP-BMEI64163.2024.10906084. (키: magrl)
 
-[15] G. Qu, Q. Chen, W. Wei, Z. Lin, X. Chen, and K. Huang, "Mobile Edge Intelligence for Large Language Models: A Contemporary Survey," *IEEE Commun. Surveys Tuts.*, vol. 27, no. 6, pp. 3820–3860, 2025, doi: 10.1109/COMST.2025.3527641. (키: survey1)
+[15] Y. Liu et al., "CacheGen: KV Cache Compression and Streaming for Fast Large Language Model Serving," in *Proc. ACM SIGCOMM*, 2024, pp. 38–56. (키: cachegen)
 
-[16] B. Sun, Z. Huang, H. Zhao, W. Xiao, X. Zhang, Y. Li, and W. Lin, "Llumnix: Dynamic Scheduling for Large Language Model Serving," in *Proc. USENIX OSDI*, 2024, pp. 173–191. (키: llumnix)
+[16] G. Qu, Q. Chen, W. Wei, Z. Lin, X. Chen, and K. Huang, "Mobile Edge Intelligence for Large Language Models: A Contemporary Survey," *IEEE Commun. Surveys Tuts.*, vol. 27, no. 6, pp. 3820–3860, 2025, doi: 10.1109/COMST.2025.3527641. (키: survey1)
 
-[17] J. Wang, J. Hu, Q. Cao, Y. Zhu, and X. Lin, "Multi-tier Dynamic Storage of KV Cache for LLM Inference under Resource-Constrained Conditions," *Complex Intell. Syst.*, 2025, doi: 10.1007/s40747-025-02200-4. (키: mtds)
+[17] B. Sun, Z. Huang, H. Zhao, W. Xiao, X. Zhang, Y. Li, and W. Lin, "Llumnix: Dynamic Scheduling for Large Language Model Serving," in *Proc. USENIX OSDI*, 2024, pp. 173–191. (키: llumnix)
 
-[18] G.-I. Yu, J. S. Jeong, G.-W. Kim, S. Kim, and B.-G. Chun, "Orca: A Distributed Serving System for Transformer-Based Generative Models," in *Proc. USENIX OSDI*, 2022. (키: orca)
+[18] J. Wang, J. Hu, Q. Cao, Y. Zhu, and X. Lin, "Multi-tier Dynamic Storage of KV Cache for LLM Inference under Resource-Constrained Conditions," *Complex Intell. Syst.*, 2025, doi: 10.1007/s40747-025-02200-4. (키: mtds)
 
-[19] X. Zhao, Y. Shi, S. Chen, J. Liu, B. Ji, and S. Mumtaz, "MAPSM: Mobility-Aware Proactive Service Migration Framework for Mobile Edge Computing in Consumer Internet of Vehicles," *IEEE Trans. Consum. Electron.*, 2025. (키: mapsm)
+[19] G.-I. Yu, J. S. Jeong, G.-W. Kim, S. Kim, and B.-G. Chun, "Orca: A Distributed Serving System for Transformer-Based Generative Models," in *Proc. USENIX OSDI*, 2022. (키: orca)
 
-> 참고: [1], [2], [8], [14], [16], [19]의 서지는 Pallas [6]의 참고문헌 목록에서 가져왔으며 제출 전 원문 대조가 필요하다. 본문에서 인용되지 않는 항목(SlimCaching, 오프로딩 서베이, DNN 캐싱, Hybrid 온·오프라인 학습, 장문맥 모델 캐싱, 출력 길이 예측 스케줄링)은 이번 판에서 제거하였다.
+[20] X. Zhao, Y. Shi, S. Chen, J. Liu, B. Ji, and S. Mumtaz, "MAPSM: Mobility-Aware Proactive Service Migration Framework for Mobile Edge Computing in Consumer Internet of Vehicles," *IEEE Trans. Consum. Electron.*, 2025. (키: mapsm)
+
+[21] M. Zhang, J. Cao, T. Wu, X. Chen, and N. Wang, "Efficient KV Cache Migration for Geo-Distributed LLM Inference in Collaborative Edge Computing," in *Proc. IEEE ICDCS*, 2026, pp. 272–282, doi: 10.1109/2575-8411.2026.00033. (키: edgeflow)
+
+[22] J. Stojkovic, C. Zhang, Í. Goiri, J. Torrellas, and E. Choukse, "DynamoLLM: Designing LLM Inference Clusters for Performance and Energy Efficiency," in *Proc. IEEE HPCA*, 2025. [논문](https://arxiv.org/abs/2408.00741), [공식 Azure LLM inference trace 2024](https://github.com/Azure/AzurePublicDataset/blob/master/AzureLLMInferenceDataset2024.md), CC BY 4.0. 본 연구는 Conversation 자료의 응답 길이 표본만 사용하며 사용자 생각 시간 자료로 해석하지 않는다. (키: azuretrace)
+
+> 참고: [1], [2], [8], [15], [17], [20]의 서지는 Pallas [6]의 참고문헌 목록에서 가져왔으며 제출 전 원문 대조가 필요하다. 본문에서 인용되지 않는 항목(SlimCaching, 오프로딩 서베이, DNN 캐싱, Hybrid 온·오프라인 학습, 장문맥 모델 캐싱, 출력 길이 예측 스케줄링)은 이번 판에서 제거하였다.

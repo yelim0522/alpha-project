@@ -1,0 +1,18 @@
+{
+  "inputs_sha256": {
+    "turn_validation_v09_seeds.csv": "3ee86f4f6ec219c8d91d08cdc6fe40444e0713d5ad75adc82f765c69f33ee2e3",
+    "turn_validation_v09_summary.csv": "8fe01c4611df646ede94ae0a3be86f89f9a7602f0b33108241f3894189737b67",
+    "turn_validation_v09_manifest.json": "38ffa110429b73987515d3a29138a6b1194d39f400e148cefe8711d708dc3c81"
+  },
+  "plot_source_sha256": "2a29a92a40603accf3392e1a17fed2d7a77a5f20620e7a75f7b7606f4b3342d3",
+  "matplotlib": "3.9.4",
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "rows_checked": 84,
+  "statistics": "seed mean; sample SD, not CI; mean of seed-specific p99, not pooled p99",
+  "ratios": "figure: mean of paired per-seed ratios; draft percentage: ratio of seed means",
+  "source_and_workload_hashes_verified": true
+}

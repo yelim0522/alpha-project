@@ -1,0 +1,3 @@
+# Optional plotting environment only; simulator and tests use the stdlib.
+# Python >= 3.9
+matplotlib==3.9.4

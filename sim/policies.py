@@ -57,6 +57,12 @@ class Policy:
                       predicted, t) -> Decision:
         raise NotImplementedError
 
+    def prepare_handover(self, user, dst, params, metrics, t):
+        """Hook for policies holding state for more than one candidate target."""
+
+    def finalize(self, metrics):
+        """Optional end-of-trace accounting."""
+
     # ----- shared helpers -------------------------------------------------- #
     @staticmethod
     def _reactive(user, dst, params, v_share, bw_share, how="hybrid") -> Decision:
@@ -124,6 +130,168 @@ class Detour(Policy):
 
     def plan_handover(self, user, dst, params, v_share, bw_share, is_pingpong, predicted, t):
         return Decision(0.0, 0.0, 0.0, "detour", False)
+
+
+@dataclass
+class BoundaryJob:
+    user_id: int
+    target: int
+    start_t: float
+    next_turn_t: float
+    prefix_total: float
+    prefix_remaining: float
+    transfer_remaining_mb: float
+    activation_remaining_s: float
+    sent_mb: float = 0.0
+
+
+class TurnBoundary(Policy):
+    """Detour until a turn ends, then migrate under shared GPU/link capacity.
+
+    A migration stays in flight across control cycles. The anchor changes only
+    after prefill, transfer and activation all finish. The conversation trace is
+    still policy-independent: a late move is charged as next-turn SIT, but the
+    trace itself is not shifted by that wait.
+    """
+
+    name = "turn-boundary"
+    order_key = staticmethod(edf_key)
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.jobs: Dict[int, BoundaryJob] = {}
+        self.unsettled = 0
+
+    def plan_handover(self, user, dst, params, v_share, bw_share, is_pingpong, predicted, t):
+        return Decision(0.0, 0.0, 0.0, "detour", False)
+
+    def on_step(self, t, dt, users, servers, params, predictions, loads, metrics):
+        eps = 1e-9
+        user_by_id = {u.id: u for u in users}
+        # A new handover, return to the anchor, or respawn invalidates in-flight work.
+        for uid, job in list(self.jobs.items()):
+            u = user_by_id[uid]
+            if u.anchor == u.server or u.server != job.target:
+                metrics.wasted_mb += ((job.prefix_total - job.prefix_remaining)
+                                      * params.kv_mb_per_token + job.sent_mb)
+                del self.jobs[uid]
+                metrics.boundary_cancels += 1
+
+        due = []
+        for u in users:
+            at_boundary = u.turn_remaining_s <= 1e-9 or u.boundary_crossed_step
+            if u.id in self.jobs or u.hops <= 0 or u.anchor == u.server or not at_boundary:
+                continue
+            due.append(u)
+        counts = {sid: sum(j.target == sid for j in self.jobs.values())
+                  + sum(u.server == sid for u in due) for sid in servers}
+        for u in due:
+            start = t + (u.boundary_offset_s if u.boundary_crossed_step else 0.0)
+            gap = u.boundary_gap_s if u.boundary_crossed_step else u.think_remaining_s
+            sid = u.server
+            contenders = counts[sid]
+            srv = servers[sid]
+            v_share = srv.prefill_share(contenders)
+            bw_share = srv.backhaul_bw / contenders
+            p = optimal_prefill_length(u.tokens, params.kv_mb_per_token, v_share, bw_share)
+            self.jobs[u.id] = BoundaryJob(u.id, sid, start, start + gap, p, p,
+                                           params.kv_mb_per_token * (u.tokens - p),
+                                           params.activation_latency)
+
+        # Event-driven fluid service: both resources run in parallel, with equal
+        # link sharing and the same batched per-request GPU rate as the simulator.
+        # Recalculate shares whenever a job starts or a resource phase finishes.
+        end = t + dt
+        now = t
+        while now < end - eps:
+            active = [j for j in self.jobs.values() if j.start_t <= now + eps]
+            future = [j.start_t for j in self.jobs.values() if j.start_t > now + eps]
+            if not active:
+                if not future:
+                    break
+                now = min(end, min(future))
+                continue
+
+            # A previous event can leave tiny residuals; snap those to zero.
+            for j in active:
+                if j.prefix_remaining <= eps:
+                    j.prefix_remaining = 0.0
+                if j.transfer_remaining_mb <= eps:
+                    j.transfer_remaining_mb = 0.0
+                if j.activation_remaining_s <= eps:
+                    j.activation_remaining_s = 0.0
+            completed = [j for j in active if j.prefix_remaining == 0.0
+                         and j.transfer_remaining_mb == 0.0
+                         and j.activation_remaining_s == 0.0]
+            if completed:
+                for j in completed:
+                    u = user_by_id[j.user_id]
+                    wait = max(0.0, now - j.next_turn_t)
+                    metrics.record_settle(wait, u.id)
+                    metrics.record_boundary_move(wait)
+                    u.anchor, u.hops = u.server, 0
+                    u.boundary_ready_t = now
+                    del self.jobs[u.id]
+                continue
+
+            gpu = [j for j in active if j.prefix_remaining > 0.0]
+            link = [j for j in active if j.transfer_remaining_mb > 0.0]
+            activating = [j for j in active if j.prefix_remaining == 0.0
+                          and j.transfer_remaining_mb == 0.0
+                          and j.activation_remaining_s > 0.0]
+            sid_groups = set(j.target for j in active)
+            rates = {}
+            for sid in sid_groups:
+                ng = sum(j.target == sid for j in gpu)
+                nl = sum(j.target == sid for j in link)
+                rates[sid] = (servers[sid].prefill_share(ng),
+                              servers[sid].backhaul_bw / nl if nl else 0.0)
+                loads[sid].prefills = max(loads[sid].prefills, ng)
+                loads[sid].streams = max(loads[sid].streams, nl)
+
+            span = end - now
+            if future:
+                span = min(span, min(future) - now)
+            for j in gpu:
+                span = min(span, j.prefix_remaining / rates[j.target][0])
+            for j in link:
+                span = min(span, j.transfer_remaining_mb / rates[j.target][1])
+            for j in activating:
+                span = min(span, j.activation_remaining_s)
+            if span <= eps:
+                # Avoid stalling on floating-point event boundaries.
+                span = min(end - now, 1e-8)
+            for j in gpu:
+                j.prefix_remaining = max(0.0, j.prefix_remaining - rates[j.target][0] * span)
+            for j in link:
+                sent = min(j.transfer_remaining_mb, rates[j.target][1] * span)
+                j.transfer_remaining_mb -= sent
+                j.sent_mb += sent
+                loads[j.target].demand_mb += sent
+                loads[j.target].sent_mb += sent
+                metrics.transferred_mb += sent
+            for j in activating:
+                j.activation_remaining_s = max(0.0, j.activation_remaining_s - span)
+            now += span
+
+        # Completion exactly at the step boundary should not be delayed by dt.
+        for j in list(self.jobs.values()):
+            if (j.start_t <= end + eps and j.prefix_remaining <= eps
+                    and j.transfer_remaining_mb <= eps and j.activation_remaining_s <= eps):
+                u = user_by_id[j.user_id]
+                wait = max(0.0, end - j.next_turn_t)
+                metrics.record_settle(wait, u.id)
+                metrics.record_boundary_move(wait)
+                u.anchor, u.hops = u.server, 0
+                u.boundary_ready_t = end
+                del self.jobs[u.id]
+        self.unsettled = sum(u.anchor != u.server for u in users)
+
+    def finalize(self, metrics):
+        metrics.boundary_pending = len(self.jobs)
+        metrics.boundary_unsettled = self.unsettled
 
 
 # --------------------------------------------------------------------------- #
@@ -213,6 +381,90 @@ class PallasApprox(Policy):
                 srv = servers[pred.target]
                 if vram_in_use(users, pred.target, c) + u.tokens * c <= srv.vram_budget_mb:
                     self._trigger(u, pred.target, t, pred.t_ho, stream_suffix=True)
+
+    def plan_handover(self, user, dst, params, v_share, bw_share, is_pingpong, predicted, t):
+        if user.prep is not None and user.prep.target == dst.id:
+            return self._residual(user, dst, params, v_share, bw_share, allow_split=False)
+        return self._reactive(user, dst, params, v_share, bw_share, "hybrid")
+
+
+class HedgedPallas(PallasApprox):
+    """Pallas with full prefix/suffix preparation for up to N likely targets.
+
+    Candidate probabilities come from the shared noisy-trajectory ensemble. Each
+    copy consumes its target's real GPU, link, and VRAM budget; losing copies are
+    cancelled at handover and counted as waste. This is intentionally a strong,
+    resource-expensive hedging baseline rather than part of the proposal.
+    """
+
+    name = "pallas-hedge2"
+
+    def __init__(self, max_candidates=2, min_probability=0.15, **kwargs):
+        self.max_candidates = max_candidates
+        self.min_probability = min_probability
+        super().__init__(**kwargs)
+
+    def reset(self):
+        super().reset()
+        self.primary_targets: Dict[int, int] = {}
+
+    @staticmethod
+    def _cancel_copy(user, target, params, metrics):
+        prep = user.hedge_preps.pop(target, None)
+        if prep is not None:
+            metrics.record_cancel(prep, params.kv_mb_per_token)
+            user.epoch += 1
+
+    def _trigger_copy(self, user, target, t, deadline, metrics):
+        user.epoch += 1
+        user.hedge_preps[target] = Prep(
+            target=target, epoch=user.epoch, trigger_t=t, deadline_t=deadline,
+            prefix_total=user.tokens, prefix_remaining=user.tokens, stream_suffix=True)
+        metrics.record_hedge_copy()
+
+    def on_step(self, t, dt, users, servers, params, predictions, loads, metrics):
+        self._observe(servers, loads)
+        c = params.kv_mb_per_token
+        for u in users:
+            pred: Optional[Prediction] = predictions.get(u.id)
+            if pred is None:
+                self.primary_targets.pop(u.id, None)
+            else:
+                self.primary_targets[u.id] = pred.target
+            raw = list(pred.candidates) if pred is not None and pred.candidates else []
+            if pred is not None and not raw:
+                raw = [pred]
+            chosen = [cand for i, cand in enumerate(raw[:self.max_candidates])
+                      if i == 0 or getattr(cand, "probability", 1.0) >= self.min_probability]
+            desired = {cand.target: cand for cand in chosen if cand.target != u.anchor}
+
+            for target in list(u.hedge_preps):
+                if target not in desired:
+                    self._cancel_copy(u, target, params, metrics)
+                else:
+                    u.hedge_preps[target].deadline_t = desired[target].t_ho
+
+            for target, cand in desired.items():
+                if target in u.hedge_preps:
+                    continue
+                t_remain = cand.t_ho - t
+                if t_remain <= 0:
+                    continue
+                tw = self._select_window(t_remain, u.tokens, self.obs_rp[target],
+                                         self.obs_bw[target], params)
+                if self._fire_now(t_remain, tw, dt):
+                    srv = servers[target]
+                    if vram_in_use(users, target, c) + u.tokens * c <= srv.vram_budget_mb:
+                        self._trigger_copy(u, target, t, cand.t_ho, metrics)
+
+    def prepare_handover(self, user, dst, params, metrics, t):
+        chosen = user.hedge_preps.pop(dst.id, None)
+        for target in list(user.hedge_preps):
+            self._cancel_copy(user, target, params, metrics)
+        if chosen is not None:
+            user.prep = chosen
+            metrics.record_hedge_hit(self.primary_targets.get(user.id) != dst.id)
+        self.primary_targets.pop(user.id, None)
 
     def plan_handover(self, user, dst, params, v_share, bw_share, is_pingpong, predicted, t):
         if user.prep is not None and user.prep.target == dst.id:

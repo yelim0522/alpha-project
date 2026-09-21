@@ -4,6 +4,10 @@
 **공유 자원(타겟 GPU prefill·gNB 간 백홀 링크·VRAM)** 위에서 비교 평가하는 이산시간
 시뮬레이터입니다. 표준 라이브러리만 사용하므로 `python3 run.py`로 바로 실행됩니다.
 
+논문용 그림은 선택 의존성 `requirements-figures.txt`를 설치한 별도 환경에서
+`python3 plot_turn_validation.py`로 생성합니다. 저장된 84회 결과와 원본 구현 해시를
+검증한 뒤 PNG/PDF/SVG를 만듭니다. [그림·재현 안내](../paper/figures/README.md)를 참고하세요.
+
 ## 실행
 
 ```bash
@@ -19,6 +23,9 @@ python3 run.py --users 12 --group 1             # 저경합: 제안 = Pallas 수
 python3 reproduce_pallas.py                     # Pallas Table 1·Fig 8(a) 재현 + K>4 외삽
 python3 optgap.py                               # 소규모 인스턴스 최적해 대비 격차(brute force)
 python3 regime_map.py --seeds 3 --csv out.csv   # 체제 지도: 문맥×사용자, 잡음×사용자, 백홀×문맥 (약 30분)
+python3 alternatives.py --seeds 3 --csv alternatives.csv  # 턴 경계·다중 후보 헤징·이상적 KV 압축
+python3 alternatives.py --maps T --turn-only --seeds 3 --csv alternatives_turn.csv  # 턴 경계만 재검증
+python3 turn_validation.py --seeds 3 --users 192 --seconds 600  # 정책별 대화 시계·실측 응답 길이
 ```
 
 출력 열: `HO` 핸드오버 수, `SITavg/p99/max` 서비스 중단 시간(s), `prep%` 준비를 사용한
@@ -33,8 +40,8 @@ python3 regime_map.py --seeds 3 --csv out.csv   # 체제 지도: 문맥×사용�
 파라미터는 Pallas 논문의 공개 수치에 맞춥니다. Table 1(Qwen3-32B, 300 Mbps, 1K/2K/4K
 토큰의 Full-Copy/Recomputation/ctHO)로 `v1`·`T0(반응형)`을, Fig. 8(a)(Qwen3-14B, 2K
 토큰, 1 Gbps, K=1–4 동시 UE)로 `T0(선제형)`·활성화 직렬화 비용을 맞추면 모든 셀이
-±10%(K=3 평균만 +15%) 안에 들어옵니다. 같은 스크립트가 K=6–32로 외삽하여, 프로토타입
-(GPU 2대)이 측정할 수 없는 구간에서 비조율 Pallas와 조율 정책이 어떻게 갈라지는지
+대부분 ±10%(K=3 평균 +15%, 최대 +12% 예외) 안에 들어옵니다. 같은 스크립트가 K=6–32로 외삽하여, 원 논문의
+측정 범위 밖에서 비조율 Pallas와 조율 정책이 어떻게 갈라지는지
 보여줍니다.
 
 ### 자원 모델(`environment.py`)
@@ -67,6 +74,8 @@ python3 regime_map.py --seeds 3 --csv out.csv   # 체제 지도: 문맥×사용�
 | `detour` | 소스 유지 + 포워딩 | 연속성 극단 |
 | `pallas-approx` | 사용자별 window 그리드 탐색(관측 EWMA 유효율), prefix FCFS + suffix 스트리밍, 타겟 변경 시 취소 | **주 베이스라인** |
 | `coordinated` | 타겟 단위 공동 계획: 계획된 GPU 점유 프로파일로 window별 완료 시각을 유체 모델(EDF 인지)로 계산하고, 다른 준비에 주는 지연(외부효과, 가중 β)을 비용에 더해 트리거를 시간축으로 분산. 계획은 예측이 바뀌기 전까지 유지. suffix 모드 선택(stream/defer), EDF prefill, VRAM 승인, 예측 불일치·핑퐁 시 detour + settle | **제안** |
+| `turn-boundary` | 현재 턴은 소스에서 포워딩하고 생성 종료 후 think interval에 ctHO 복구. think time을 넘는 부분만 SIT | **대안 비교군** |
+| `pallas-hedge2` | noisy-CVH ensemble의 상위 2개 타겟에 prefix/suffix를 모두 준비. 복제본도 실제 GPU·백홀·VRAM을 소모하고 loser는 낭비로 계산 | **대안 비교군** |
 
 두 선제 정책은 같은 window 격자(0.2 s), 같은 목적함수(α=0.8), 같은 `T_max`(5 s), 같은
 트리거 규칙을 쓰며, 후보가 하나이고 활성 준비가 없으면 `coordinated`는 `pallas-approx`와
@@ -97,6 +106,9 @@ python3 regime_map.py --seeds 3 --csv out.csv   # 체제 지도: 문맥×사용�
 - `optgap.py` — K=3–5 인스턴스에서 트리거 스케줄 전수 탐색 대비 격차
 - `regime_map.py` — 문맥 길이·사용자 수·예측 잡음·백홀 대역폭 격자에서 ctHO/Pallas/제안의 승자 지도.
   셀마다 SIT 평균·p99, 비율 격자(Pallas/ctHO, 제안/Pallas), Detour의 ITL 페널티를 출력(`--csv`)
+- `alternatives.py` — (T/T2) 턴 경계 및 think-time 민감도, (H) 예측 잡음별 top-2 헤징,
+  (K) 이상적 KV 압축률(1, 1/2, 1/4, 1/8) 비교. 압축은 코덱 오버헤드를 빼 압축에
+  유리한 upper bound이며, 턴 모델 기본값은 output 128 tokens / think 4 s이다.
 
 ## 루프 순서(주의)
 
@@ -105,10 +117,23 @@ python3 regime_map.py --seeds 3 --csv out.csv   # 체제 지도: 문맥×사용�
 "이상적 트리거 시점이 다음 제어 주기 전에 오면 지금 트리거"로 이산화했습니다(격자와 예측
 잔여 시간이 어긋나 트리거가 영구히 누락되는 문제를 막음).
 
+## 정책별 대화 시계 검증
+
+대화 시계 검증은 `--conversation-clock closed-loop`로 활성화한다. 기본 `trace` 모드는 기존 체제 지도와 비교를 위해 유지한다. 새 모드는 모든 정책에서 실제 복구 대기와 전달 지연만큼 다음 턴을 늦추며, 완료 응답 수와 검열된 대기도 보고한다. `response_wait_*`는 완료 응답별 실제 중단 시간이고 기존 이전 사건별 SIT와 분모가 다르다. `response_excess_*`는 중단과 전달 지연을 포함한 응답 완료까지의 추가 시간이다.
+
+```sh
+python3 run.py --alternatives --conversation-clock closed-loop --turn-distribution lognormal --think-distribution mixture
+python3 run.py --alternatives --conversation-clock closed-loop --turn-workload data/azure_output_histogram.json
+python3 turn_validation.py --seeds 1 --users 16 --seconds 60 --scenarios fixed,azure-mixture --output /tmp/turn_smoke
+python3 -m unittest discover
+```
+
+`turn_validation.py`는 시드별 CSV·평균/표준편차 CSV·재현용 설정/해시 JSON을 남긴다. 저장된 Azure 히스토그램을 쓰므로 실험은 오프라인 실행 가능하다. 자료 추출은 `prepare_turn_workload.py`, 출처·표본 한계는 `data/README.md`, 결과는 `../paper/turn_boundary_validation.md`를 참조한다. 생각 시간은 합성 가정이고 실제 대화 순서를 재생하지 않는다. `--decode-capacity`는 서버당 생성 처리량 민감도이며 GPU 실측값이 아니다. VRAM은 점유를 기록하되 전체 상주 메모리의 승인·퇴거는 모델링하지 않는다.
+
 ## 확장 지점(본실험 TODO)
 
 1. **실제 이동성 트레이스**: nuScenes(Pallas와 동일), T-Drive/Rome/Porto taxi.
-2. **대화 길이 분포**: ShareGPT/LMSYS-Chat-1M 실측 분포.
+2. **대화 길이·생각 시간**: Azure 응답 길이 표본과 합성 생각 시간 검증은 추가됨. 실제 세션 순서·입력 토큰·턴 간 간격의 짝 자료가 남음.
 3. **자원 모델 정밀화**: chunked prefill과 상주 디코딩 세션(HI 경합), 링크 프로토콜 오버헤드.
 4. **VRAM을 계획에 반영**: 현재는 트리거 시점 승인만 하므로 예산이 작으면 준비가 보류됨.
 5. **예측 신뢰도 활용**: 다중 후보 확률 가중 준비(헤징).
