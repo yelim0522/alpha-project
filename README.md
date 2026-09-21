@@ -21,7 +21,8 @@ EdgeFlow는 다중 KV 이전을, ImpactHO는 이동 사용자들의 부분 KV와
 목표 서버의 GPU·링크 경합을 고려해 여러 사용자의 준비 시작 시점을 공동 계획**하는
 것입니다. 경합이 없으면 Pallas와 같은 결정으로 수렴합니다.
 
-- [paper/draft.md](paper/draft.md) — 팀 검토용 초안 v0.11(초록·결과·결론 정리, 턴 경계 검증 그림 포함)
+- [paper/draft.md](paper/draft.md) — 팀 검토용 초안 v0.12(현재 알고리즘 명세·보장 범위 정리, 기존 결과·그림 유지)
+- [paper/coordination_algorithm.md](paper/coordination_algorithm.md) — 10줄 의사코드, 코드 대응, 메모리·최적성 한계와 기능별 비교 설계
 - [paper/figures/README.md](paper/figures/README.md) — 논문용 그림 2개(PNG/PDF/SVG), 통계 정의와 재현 방법
 - `paper/impactho_comparison.md` — ImpactHO와 본 연구의 문제·결정 변수·지표 대조
 - `paper/turn_boundary_validation.md` — 턴 경계 한계 검증 결과, 응답 완료량·실제 대기·자원 점유 해석
