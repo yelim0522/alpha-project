@@ -10,6 +10,17 @@
 
 ## 실행
 
+기본은 과거 결과용 `legacy` 모드입니다. 새 공통 준비 메모리 예약은
+`python3 run.py --memory-mode reserved`로 선택합니다. 이때 기본 조율형은 detour를 끈
+`coordinated-core-v1`입니다. 별도 `BoundaryJob`을 쓰는 턴 경계는 아직 지원하지 않아
+`--alternatives`와 함께 쓰면 오류로 중단합니다. `python3 validate_memory.py`는
+24회 소규모 정확성 검사를 수행하고 설정·코드 해시·지표를 `memory_validation_v1.json`에
+저장합니다([2일차 보고서](../paper/memory_reservation_validation.md)).
+
+예약은 전체 GPU VRAM이 아니라 선제 준비용 KV 예산에 적용합니다. 과거 그림의
+코드 해시 검사도 유지하므로 현재 코드에서 과거 그림을 다시 만들 수는 없습니다.
+원본 스냅샷에서 재현하거나 새 결과를 별도로 생성해야 합니다.
+
 ```bash
 cd sim
 python3 run.py                                  # 64명, 플래툰 8, 서버 6, 300 Mbps, Qwen3-32B

@@ -26,6 +26,7 @@ from metrics import Metrics
 from policies import (all_policies, ablation_ladder, PallasApprox, Coordinated,
                       HedgedPallas, TurnBoundary, Decision)
 from prediction import predict_all
+from memory import configure_memory
 
 
 def make_params(cfg) -> CostParams:
@@ -144,6 +145,8 @@ def run_policy(policy, cfg, server_list, trace) -> dict:
     params = make_params(cfg)
     users = [User(id=i, x=0.0, y=0.0) for i in range(cfg.users)]
     metrics = Metrics()
+    memory = configure_memory(policy, getattr(cfg, 'memory_mode', 'legacy'),
+                              servers, params, metrics)
     clock = None
     if getattr(cfg, "conversation_clock", "trace") == "closed-loop":
         from conversation import ConversationClock
@@ -173,6 +176,12 @@ def run_policy(policy, cfg, server_list, trace) -> dict:
             here = nearest_server(u, servers.values())
             if u.server == -1 or respawned:
                 # Fresh session: state is born at the serving server, nothing to migrate.
+                if memory is not None:
+                    for prep in ([u.prep] if u.prep is not None else []) + list(u.hedge_preps.values()):
+                        metrics.record_cancel(prep, c)
+                    u.session += 1
+                    if hasattr(policy, 'plans'):
+                        policy.plans.pop(u.id, None)
                 if u.prep is not None:
                     u.prep, u.epoch = None, u.epoch + 1
                 u.hedge_preps.clear()
@@ -245,10 +254,12 @@ def run_policy(policy, cfg, server_list, trace) -> dict:
         # 2) Policy control cycle with the fresh predictions, then resource progression.
         if clock is not None:
             clock.account_residence(users, cfg.dt, params)
+        if memory is not None:
+            memory.sync(users)
         policy.on_step(t, cfg.dt, users, servers, params, preds, loads, metrics)
         if clock is not None:
             clock.advance(users, policy, t, cfg.dt, params)
-        prep_loads = advance_preparations(users, servers, params, t, cfg.dt, policy.order_key)
+        prep_loads = advance_preparations(users, servers, params, t, cfg.dt, policy.order_key, memory)
         for sid, ld in prep_loads.items():
             tot = loads[sid]
             tot.streams += ld.streams
@@ -269,12 +280,17 @@ def run_policy(policy, cfg, server_list, trace) -> dict:
                 loads[u.server].prefills += 1
                 u.anchor, u.hops, u.prep = u.server, 0, None
 
+        if memory is not None:
+            memory.sync(users)
         if clock is None:
             metrics.record_itl(users, params)
         metrics.record_step_load(loads, cfg.dt)
         prev_loads, prev_preds = loads, preds
     policy.finalize(metrics)
     summary = metrics.summary()
+    if memory is not None:
+        memory.finish(users)
+        summary.update(memory.summary())
     if clock is not None:
         summary.update(clock.summary())
     return summary
@@ -318,6 +334,8 @@ def print_table(rows):
 
 def policies_for(cfg):
     pols = all_policies()
+    if getattr(cfg, 'memory_mode', 'legacy') == 'reserved':
+        pols[-1] = Coordinated(detour=False, label='coordinated-core-v1')
     if cfg.controlled:
         pols += [PallasApprox(t_max=15.0, label="pallas-tmax15"),
                  PallasApprox(alpha=0.5, label="pallas-a0.5"),
@@ -369,6 +387,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--kv-kib", type=float, default=None, help="KV bytes per token (KiB)")
     ap.add_argument("--activation-serial", type=float, default=0.04)
     ap.add_argument("--vram-mb", type=float, default=6000.0)
+    ap.add_argument("--memory-mode", choices=['legacy', 'reserved'], default='legacy',
+                    help="reserved: shared preparation-KV reservations; default coordinated is detour-off")
     ap.add_argument("--pred-speed-noise", type=float, default=0.0)
     ap.add_argument("--pred-heading-noise", type=float, default=0.0)
     ap.add_argument("--pred-candidates", type=int, default=1,
@@ -399,6 +419,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def finalize_cfg(cfg):
     """Fill derived fields (model preset, geometry, context band) on a parsed namespace."""
+    if getattr(cfg, 'memory_mode', 'legacy') == 'reserved':
+        if getattr(cfg, 'alternatives', False):
+            raise ValueError('--alternatives includes unsupported TurnBoundary in reserved mode')
+        if not math.isfinite(cfg.dt) or cfg.dt <= 0:
+            raise ValueError('reserved mode requires finite positive --dt')
+        if not math.isfinite(cfg.vram_mb) or cfg.vram_mb < 0:
+            raise ValueError('reserved mode requires finite non-negative --vram-mb')
     preset = MODEL_PRESETS[cfg.model]
     cfg.kv_kib = cfg.kv_kib if cfg.kv_kib is not None else preset["kv_kib"]
     cfg.prefill_speed = cfg.prefill_speed if cfg.prefill_speed is not None else preset["prefill_speed"]
@@ -444,8 +471,16 @@ def main():
         print(f"scenario: {cfg.users} users ({cfg.mobility}, group={cfg.group}), {cfg.servers} servers, "
               f"{cfg.steps}x{cfg.dt}s, speed={cfg.speed} m/s, link={cfg.backhaul_mbps} Mbps, "
               f"model={cfg.model} (c={cfg.kv_kib:.0f} KiB, v1={cfg.prefill_speed:.0f} tok/s, "
-              f"x{cfg.prefill_parallel:.0f} batched), seeds={cfg.seeds}\n")
-        print_table(run_scenario(cfg))
+              f"x{cfg.prefill_parallel:.0f} batched), seeds={cfg.seeds}, memory={cfg.memory_mode}\n")
+        results = run_scenario(cfg)
+        print_table(results)
+        if cfg.memory_mode == 'reserved':
+            for name, result in results:
+                print(f"  {name}: admissions={result['memory_admissions']:.1f}, "
+                      f"defers={result['memory_defer_attempts']:.1f}, "
+                      f"memory-cancels={result['memory_cancels']:.1f}, "
+                      f"peak-reserved={result['memory_peak_reserved_target_mb']:.1f} MB/target, "
+                      f"violations={result['memory_violations']:.0f}")
         print()
 
 

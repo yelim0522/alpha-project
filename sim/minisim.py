@@ -8,6 +8,7 @@ from environment import (Server, User, CostParams, LinkLoad, MODEL_PRESETS, adva
                          edf_key)
 from metrics import Metrics
 from prediction import Prediction
+from memory import configure_memory
 
 
 def params_for(model: str, activation_serial: float = 0.04) -> CostParams:
@@ -20,7 +21,8 @@ def params_for(model: str, activation_serial: float = 0.04) -> CostParams:
 
 def mini_sim(policy, model: str, link_mbps: float, contexts: Sequence[float],
              t_hos: Sequence[float], dt: float, vram_mb: float = 20000.0,
-             prefill_parallel: float = 4.0, with_early: bool = False):
+             prefill_parallel: float = 4.0, with_early: bool = False,
+             memory_mode: str = 'legacy'):
     """Return per-user SIT (s) (and per-user early exposure if with_early). Users
     whose handover instant coincides share the target GPU/link at that instant;
     prepared caches activate serially."""
@@ -35,6 +37,7 @@ def mini_sim(policy, model: str, link_mbps: float, contexts: Sequence[float],
     preds = {u.id: Prediction(1, float(t_hos[u.id]), 1.0) for u in users}
     metrics = Metrics()
     policy.reset()
+    memory = configure_memory(policy, memory_mode, servers, params, metrics)
     policy.trigger_log = []
     loads = {sid: LinkLoad() for sid in servers}
     horizon = max(t_hos)
@@ -47,6 +50,9 @@ def mini_sim(policy, model: str, link_mbps: float, contexts: Sequence[float],
         due = [u for u in users if sits[u.id] is None and preds[u.id].t_ho <= t + 1e-9]
         if due:
             tgt = servers[1]
+            if memory is not None:
+                for u in due:
+                    policy.prepare_handover(u, tgt, params, metrics, t)
             n_gpu = sum(1 for u in due if u.prep is None or u.prep.target != 1)
             n_bg = 0 if policy.order_key is edf_key else loads[1].prefills
             v_share = tgt.prefill_share(n_gpu + n_bg)
@@ -60,16 +66,22 @@ def mini_sim(policy, model: str, link_mbps: float, contexts: Sequence[float],
                 if u.prep is not None and u.prep.target == 1 and u.prep.prefix_done_t is not None:
                     earlies[u.id] = max(0.0, t - u.prep.prefix_done_t)
                 sits[u.id] = dec.sit
+                if memory is not None and u.prep is not None and not dec.used_prep:
+                    policy._cancel(u, params, metrics, t)
                 u.prep = None
                 u.server = u.anchor = 1
                 preds.pop(u.id, None)
+        if memory is not None:
+            memory.sync(users)
         if step == n_steps:
             break
         policy.on_step(t, dt, users, servers, params, preds, loads, metrics)
-        loads = advance_preparations(users, servers, params, t, dt, policy.order_key)
+        loads = advance_preparations(users, servers, params, t, dt, policy.order_key, memory)
         for u in users:
             if sits[u.id] is None:
                 u.tokens += params.decode_rate * dt
         t += dt
     sits = [s if s is not None else 0.0 for s in sits]
+    if memory is not None:
+        memory.finish(users)
     return (sits, earlies) if with_early else sits
