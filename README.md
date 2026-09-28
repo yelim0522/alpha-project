@@ -21,7 +21,10 @@ EdgeFlow는 다중 KV 이전을, ImpactHO는 이동 사용자들의 부분 KV와
 목표 서버의 GPU·링크 경합을 고려해 여러 사용자의 준비 시작 시점을 공동 계획**하는
 것입니다. 경합이 없으면 Pallas와 같은 결정으로 수렴합니다.
 
-- [paper/draft.md](paper/draft.md) — 팀 검토용 초안 v0.11(초록·결과·결론 정리, 턴 경계 검증 그림 포함)
+- [paper/draft.md](paper/draft.md) — 팀 검토용 초안 v0.14(공통 메모리 예약 구현·소규모 검증, 기존 성능 결과·그림은 예약 전 버전)
+- [paper/memory_reservation_validation.md](paper/memory_reservation_validation.md) — 2일차 완료: 예약 관리자, 테스트 57개, 소규모 24회 검증과 실행 방법
+- [paper/coordination_v1_decisions.md](paper/coordination_v1_decisions.md) — 1일차 완료: 예약·반환 규칙, 핵심/보조 기능, 주장 범위와 2일차 구현 기준
+- [paper/coordination_algorithm.md](paper/coordination_algorithm.md) — 10줄 의사코드, 코드 대응, 메모리·최적성 한계와 기능별 비교 설계
 - [paper/figures/README.md](paper/figures/README.md) — 논문용 그림 2개(PNG/PDF/SVG), 통계 정의와 재현 방법
 - `paper/impactho_comparison.md` — ImpactHO와 본 연구의 문제·결정 변수·지표 대조
 - `paper/turn_boundary_validation.md` — 턴 경계 한계 검증 결과, 응답 완료량·실제 대기·자원 점유 해석
@@ -34,6 +37,8 @@ EdgeFlow는 다중 KV 이전을, ImpactHO는 이동 사용자들의 부분 KV와
 cd sim && python3 run.py                       # 기본: 64명, 플래툰 8, 서버 6, Qwen3-32B
 python3 run.py --sweep-users 32,64,128,192 --seeds 3   # 밀도 스윕(herding 재현)
 python3 run.py --ablation --seeds 3            # 제안 메커니즘 사다리
+python3 run.py --memory-mode reserved --users 32 --steps 240  # 공통 예약 + detour 없는 핵심 조율형
+python3 validate_memory.py                    # 2일차 정확성 검증(24회, 별도 결과 JSON)
 python3 run.py --controlled --seeds 3          # Pallas 재조정 변형 통제실험
 python3 reproduce_pallas.py                    # Pallas Table 1·Fig 8(a) 재현 + K>4 외삽
 python3 optgap.py                              # K=3–5 전수 탐색 대비 격차
@@ -42,6 +47,6 @@ python3 alternatives.py --seeds 3 --csv alternatives.csv  # 턴 경계·헤징·
 python3 turn_validation.py --seeds 3 --users 192 --seconds 600  # 정책별 대화 시계·길이 분포 검증
 ```
 
-기존 결과로 그림만 다시 만들 때는 실험을 재실행할 필요가 없습니다. 별도 가상환경에
+기존 결과로 그림만 다시 만들 때는 실험을 재실행할 필요가 없지만 **원본 코드 스냅샷**에서 실행해야 합니다. 예약 구현으로 현재 코드 해시가 바뀌었으므로 현재 작업본에서는 과거 그림의 해시 검사가 중단됩니다. 별도 가상환경에
 `sim/requirements-figures.txt`를 설치하고 저장소 루트에서
 `python sim/plot_turn_validation.py`를 실행합니다([상세 절차](paper/figures/README.md)).

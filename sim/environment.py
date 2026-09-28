@@ -100,6 +100,7 @@ class User:
     boundary_offset_s: float = 0.0  # time from the start of this step to turn end
     recovery_until_s: float = 0.0  # optional closed-loop conversation gate
     boundary_ready_t: float = 0.0  # exact completion time of a boundary migration
+    session: int = 0             # reservation identity; increment on respawn
 
 
 @dataclass
@@ -221,9 +222,11 @@ def edf_key(prep: Prep, t: float) -> float:
 
 
 def advance_preparations(users: List[User], servers: Dict[int, Server], params: CostParams,
-                         t: float, dt: float, order_key: OrderKey = fcfs_key
+                         t: float, dt: float, order_key: OrderKey = fcfs_key, memory=None
                          ) -> Dict[int, LinkLoad]:
     """Advance every active Prep by dt under shared GPU/link capacity."""
+    if memory is not None:
+        memory.before_advance(users, t, dt)
     loads: Dict[int, LinkLoad] = {sid: LinkLoad() for sid in servers}
     by_target: Dict[int, List] = {}
     for u in users:
@@ -273,6 +276,8 @@ def advance_preparations(users: List[User], servers: Dict[int, Server], params: 
                 p.suffix_backlog_mb -= sent
                 p.suffix_sent_mb += sent
                 load.sent_mb += sent
+    if memory is not None:
+        memory.after_advance(users, dt)
     return loads
 
 

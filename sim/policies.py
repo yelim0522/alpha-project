@@ -83,7 +83,16 @@ class Policy:
             user.prep = None
             user.epoch += 1
 
-    def _trigger(self, user, target, t, deadline, stream_suffix=True):
+    def _memory_gate(self, users, user, target, servers, params):
+        # Reserved mode queues all due requests for one common admission order.
+        return (getattr(self, 'memory', None) is not None or
+                vram_in_use(users, target, params.kv_mb_per_token) +
+                user.tokens * params.kv_mb_per_token <= servers[target].vram_budget_mb)
+
+    def _trigger(self, user, target, t, deadline, stream_suffix=True, planned=None):
+        if getattr(self, 'memory', None) is not None:
+            self.memory.request(self, user, target, t, deadline, stream_suffix, planned=planned)
+            return
         user.epoch += 1
         user.prep = Prep(target=target, epoch=user.epoch, trigger_t=t, deadline_t=deadline,
                          prefix_total=user.tokens, prefix_remaining=user.tokens,
@@ -379,8 +388,9 @@ class PallasApprox(Policy):
                                      self.obs_bw[pred.target], params)
             if self._fire_now(t_remain, tw, dt):
                 srv = servers[pred.target]
-                if vram_in_use(users, pred.target, c) + u.tokens * c <= srv.vram_budget_mb:
-                    self._trigger(u, pred.target, t, pred.t_ho, stream_suffix=True)
+                if self._memory_gate(users, u, pred.target, servers, params):
+                    self._trigger(u, pred.target, t, pred.t_ho, stream_suffix=True,
+                                  planned=pred.t_ho - tw)
 
     def plan_handover(self, user, dst, params, v_share, bw_share, is_pingpong, predicted, t):
         if user.prep is not None and user.prep.target == dst.id:
@@ -415,7 +425,10 @@ class HedgedPallas(PallasApprox):
             metrics.record_cancel(prep, params.kv_mb_per_token)
             user.epoch += 1
 
-    def _trigger_copy(self, user, target, t, deadline, metrics):
+    def _trigger_copy(self, user, target, t, deadline, metrics, planned=None):
+        if getattr(self, 'memory', None) is not None:
+            self.memory.request(self, user, target, t, deadline, copy=True, planned=planned)
+            return
         user.epoch += 1
         user.hedge_preps[target] = Prep(
             target=target, epoch=user.epoch, trigger_t=t, deadline_t=deadline,
@@ -454,8 +467,9 @@ class HedgedPallas(PallasApprox):
                                          self.obs_bw[target], params)
                 if self._fire_now(t_remain, tw, dt):
                     srv = servers[target]
-                    if vram_in_use(users, target, c) + u.tokens * c <= srv.vram_budget_mb:
-                        self._trigger_copy(u, target, t, cand.t_ho, metrics)
+                    if self._memory_gate(users, u, target, servers, params):
+                        self._trigger_copy(u, target, t, cand.t_ho, metrics,
+                                           planned=cand.t_ho - tw)
 
     def prepare_handover(self, user, dst, params, metrics, t):
         chosen = user.hedge_preps.pop(dst.id, None)
@@ -666,6 +680,8 @@ class Coordinated(PallasApprox):
             if u.prep is not None:
                 self.plans.pop(u.id, None)
                 if u.prep.target == u.server:
+                    if getattr(self, 'memory', None) is not None:
+                        active.setdefault(u.prep.target, []).append(u.prep)
                     continue                                  # settle migration in flight
                 if pred is None or pred.target != u.prep.target:
                     self._cancel(u, params, metrics, t)
@@ -677,7 +693,7 @@ class Coordinated(PallasApprox):
             # in the background (no handover deadline; short window).
             if u.hops > 0 and u.history and t - u.history[-1][1] >= self.settle_grace:
                 self.plans.pop(u.id, None)
-                if vram_in_use(users, u.server, c) + u.tokens * c <= servers[u.server].vram_budget_mb:
+                if self._memory_gate(users, u, u.server, servers, params):
                     self._trigger(u, u.server, t, t + 2.0, stream_suffix=False)
                 continue
             if pred is None or pred.target == u.anchor:
@@ -707,9 +723,12 @@ class Coordinated(PallasApprox):
                 self.plans.update(new_plans)
                 triggers += new_trig
             for u, stream in triggers:
-                if vram_in_use(users, sid, c) + u.tokens * c <= srv.vram_budget_mb:
-                    self.plans.pop(u.id, None)
-                    self._trigger(u, sid, t, predictions[u.id].t_ho, stream_suffix=stream)
+                if self._memory_gate(users, u, sid, servers, params):
+                    planned = self.plans[u.id]['start']
+                    if getattr(self, 'memory', None) is None:
+                        self.plans.pop(u.id, None)
+                    self._trigger(u, sid, t, predictions[u.id].t_ho,
+                                  stream_suffix=stream, planned=planned)
 
     def plan_handover(self, user, dst, params, v_share, bw_share, is_pingpong, predicted, t):
         if user.prep is not None and user.prep.target == dst.id:
